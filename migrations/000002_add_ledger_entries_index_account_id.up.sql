@@ -1,0 +1,1 @@
+CREATE INDEX CONCURRENTLY idx_ledger_entries_account_id ON ledger_entries (account_id) INCLUDE (amount);
