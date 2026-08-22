@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -10,7 +11,8 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("record not found")
+	ErrNotFound     = errors.New("record not found")
+	ErrDuplicateKey = errors.New("duplicate idempotency key")
 )
 
 type DBTX interface {
@@ -20,6 +22,15 @@ type DBTX interface {
 
 type Storage struct {
 	db *pgxpool.Pool
+}
+
+type Transaction struct {
+	ID                      int64
+	SourceID, DestinationID int64
+	Amount                  int64
+	IdempotencyKey          string
+	Status                  string
+	CreatedAt               time.Time
 }
 
 func New(db *pgxpool.Pool) *Storage {
@@ -78,20 +89,34 @@ func (s *Storage) GetAccountBalance(ctx context.Context, tx DBTX, accountID int6
 	return balance, err
 }
 
-func (s *Storage) CreateTransaction(ctx context.Context, tx DBTX, idempotencyKey string) (int64, error) {
+func (s *Storage) CreateTransaction(ctx context.Context, tx DBTX, transaction Transaction) (int64, error) {
 	var id int64
 
 	err := tx.QueryRow(ctx, `
-			INSERT INTO transactions (idempotency_key, status)
-			VALUES ($1, 'completed')
+			INSERT INTO transactions (source_id, destination_id, amount, idempotency_key, status)
+			VALUES ($1, $2, $3, $4, 'completed')
+			ON CONFLICT (idempotency_key) DO NOTHING
 			RETURNING id;
-	`, idempotencyKey).Scan(&id)
+	`, transaction.SourceID, transaction.DestinationID, transaction.Amount, transaction.IdempotencyKey).Scan(&id)
 
-	if err != nil {
-		return 0, err
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrDuplicateKey
 	}
 
-	return id, nil
+	return id, err
+}
+
+func (s *Storage) GetTransaction(ctx context.Context, tx DBTX, idempotencyKey string) (Transaction, error) {
+	var t Transaction
+
+	err := tx.QueryRow(ctx, `
+			SELECT id, idempotency_key, status, created_at, source_id, destination_id, amount
+			FROM transactions
+			WHERE idempotency_key = $1;
+	`, idempotencyKey).Scan(&t.ID, &t.IdempotencyKey, &t.Status, &t.CreatedAt,
+		&t.SourceID, &t.DestinationID, &t.Amount)
+
+	return t, err
 }
 
 func (s *Storage) CreateLedgerEntry(ctx context.Context, tx DBTX, transactionID, accountID int64, amount int64) error {
