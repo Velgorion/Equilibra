@@ -11,23 +11,32 @@ import (
 )
 
 var (
-	ErrNotEnough        = errors.New("not enough balance to write off this amount")
-	ErrInvalidAmount    = errors.New("invalid amount")
-	ErrSameAccount      = errors.New("transfer to the same account")
-	ErrCurrencyMismatch = errors.New("the currencies of the accounts do not match")
+	ErrNotEnough                  = errors.New("not enough balance to write off this amount")
+	ErrInvalidAmount              = errors.New("invalid amount")
+	ErrSameAccount                = errors.New("transfer to the same account")
+	ErrCurrencyMismatch           = errors.New("the currencies of the accounts do not match")
+	ErrSourceAccountNotFound      = errors.New("source account not found")
+	ErrDestinationAccountNotFound = errors.New("destination account not found")
+	ErrTransactionsMismatch       = errors.New("values in the transaction with the same idempotencyKey have changed")
 )
 
 type Storage interface {
 	BeginTx(ctx context.Context) (pgx.Tx, error)
 	GetAccountBalance(ctx context.Context, tx storage.DBTX, accountID int64) (int64, error)
-	CreateTransaction(ctx context.Context, tx storage.DBTX, idempotencyKey string) (int64, error)
+	CreateTransaction(ctx context.Context, tx storage.DBTX, transaction storage.Transaction) (int64, error)
 	CreateLedgerEntry(ctx context.Context, tx storage.DBTX, transactionID, accountID int64, amount int64) error
 	GetAccountCurrencyForUpdate(ctx context.Context, tx storage.DBTX, accountID int64) (string, error)
 	GetAccountCurrency(ctx context.Context, tx storage.DBTX, accountID int64) (string, error)
+	GetTransaction(ctx context.Context, tx storage.DBTX, idempotencyKey string) (storage.Transaction, error)
 }
 
 type Service struct {
 	storage Storage
+}
+
+type Result struct {
+	TransactionID int64
+	Status        string
 }
 
 func New(s Storage) *Service {
@@ -35,67 +44,99 @@ func New(s Storage) *Service {
 }
 
 func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64,
-	amount int64, idempotencyKey string) error {
+	amount int64, idempotencyKey string) (*Result, error) {
 
 	if amount <= 0 {
-		return ErrInvalidAmount
+		return nil, ErrInvalidAmount
 	}
 
 	if fromAccountID == toAccountID {
-		return ErrSameAccount
+		return nil, ErrSameAccount
 	}
 
 	tx, err := s.storage.BeginTx(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() {
 		_ = tx.Rollback(context.Background())
 	}()
 
+	transactionID, err := s.storage.CreateTransaction(ctx, tx, storage.Transaction{
+		SourceID: fromAccountID, DestinationID: toAccountID, Amount: amount, IdempotencyKey: idempotencyKey,
+	})
+
+	if err != nil {
+
+		if errors.Is(err, storage.ErrDuplicateKey) {
+			prevTransaction, err := s.storage.GetTransaction(ctx, tx, idempotencyKey)
+			if err != nil {
+				return nil, err
+			}
+
+			// return the result of the transaction with the same key if the arguments match
+			if compareTransactions(storage.Transaction{SourceID: fromAccountID, DestinationID: toAccountID, Amount: amount,
+				IdempotencyKey: idempotencyKey}, prevTransaction) {
+
+				return &Result{TransactionID: prevTransaction.ID, Status: prevTransaction.Status}, nil
+			}
+
+			// otherwise it's a error
+			return nil, ErrTransactionsMismatch
+		}
+
+		return nil, err
+	}
+
 	destinationCurrency, err := s.storage.GetAccountCurrency(ctx, tx, toAccountID)
 	if err != nil {
-		return fmt.Errorf("destination account %d: %w", toAccountID, err)
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, ErrDestinationAccountNotFound
+		}
+		return nil, fmt.Errorf("get destination currency: %w", err)
 	}
 
 	sourceCurrency, err := s.storage.GetAccountCurrencyForUpdate(ctx, tx, fromAccountID)
 	if err != nil {
-		return fmt.Errorf("source account %d: %w", fromAccountID, err)
-
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, ErrSourceAccountNotFound
+		}
+		return nil, fmt.Errorf("get source currency: %w", err)
 	}
 
 	if sourceCurrency != destinationCurrency {
-		return ErrCurrencyMismatch
+		return nil, ErrCurrencyMismatch
 	}
 
 	balanceFrom, err := s.storage.GetAccountBalance(ctx, tx, fromAccountID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	newBalance := balanceFrom - amount
 
 	if newBalance < 0 {
-		return ErrNotEnough
-	}
-
-	transactionID, err := s.storage.CreateTransaction(ctx, tx, idempotencyKey)
-	if err != nil {
-		return err
+		return nil, ErrNotEnough
 	}
 
 	err = s.storage.CreateLedgerEntry(ctx, tx, transactionID, fromAccountID, -amount)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	err = s.storage.CreateLedgerEntry(ctx, tx, transactionID, toAccountID, amount)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	commitCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	return tx.Commit(commitCtx)
+	return &Result{TransactionID: transactionID, Status: "completed"}, tx.Commit(commitCtx)
+}
+
+func compareTransactions(curr, prev storage.Transaction) bool {
+	return curr.SourceID == prev.SourceID &&
+		curr.DestinationID == prev.DestinationID &&
+		curr.Amount == prev.Amount
 }
