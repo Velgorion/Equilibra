@@ -1,0 +1,4 @@
+ALTER TABLE transactions
+DROP COLUMN IF EXISTS source_id,
+DROP COLUMN IF EXISTS destination_id,
+DROP COLUMN IF EXISTS amount;
