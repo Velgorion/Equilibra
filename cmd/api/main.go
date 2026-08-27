@@ -8,6 +8,7 @@ import (
 	"github.com/Velgorion/equilibra/internal/config"
 	"github.com/Velgorion/equilibra/internal/service"
 	"github.com/Velgorion/equilibra/internal/storage"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 )
