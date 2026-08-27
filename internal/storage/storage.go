@@ -89,21 +89,26 @@ func (s *Storage) GetAccountBalance(ctx context.Context, tx DBTX, accountID int6
 	return balance, err
 }
 
-func (s *Storage) CreateTransaction(ctx context.Context, tx DBTX, transaction Transaction) (int64, error) {
-	var id int64
+func (s *Storage) CreateTransaction(ctx context.Context, tx DBTX, transaction Transaction) (Transaction, error) {
+	created := transaction
+	created.Status = "completed"
 
 	err := tx.QueryRow(ctx, `
 			INSERT INTO transactions (source_id, destination_id, amount, idempotency_key, status)
 			VALUES ($1, $2, $3, $4, 'completed')
 			ON CONFLICT (idempotency_key) DO NOTHING
-			RETURNING id;
-	`, transaction.SourceID, transaction.DestinationID, transaction.Amount, transaction.IdempotencyKey).Scan(&id)
+			RETURNING id, created_at;
+	`, transaction.SourceID, transaction.DestinationID, transaction.Amount,
+		transaction.IdempotencyKey).Scan(&created.ID, &created.CreatedAt)
 
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, ErrDuplicateKey
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Transaction{}, ErrDuplicateKey
+		}
+		return Transaction{}, err
 	}
 
-	return id, err
+	return created, nil
 }
 
 func (s *Storage) GetTransaction(ctx context.Context, tx DBTX, idempotencyKey string) (Transaction, error) {
