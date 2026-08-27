@@ -23,7 +23,7 @@ var (
 type Storage interface {
 	BeginTx(ctx context.Context) (pgx.Tx, error)
 	GetAccountBalance(ctx context.Context, tx storage.DBTX, accountID int64) (int64, error)
-	CreateTransaction(ctx context.Context, tx storage.DBTX, transaction storage.Transaction) (int64, error)
+	CreateTransaction(ctx context.Context, tx storage.DBTX, transaction storage.Transaction) (storage.Transaction, error)
 	CreateLedgerEntry(ctx context.Context, tx storage.DBTX, transactionID, accountID int64, amount int64) error
 	GetAccountCurrencyForUpdate(ctx context.Context, tx storage.DBTX, accountID int64) (string, error)
 	GetAccountCurrency(ctx context.Context, tx storage.DBTX, accountID int64) (string, error)
@@ -35,8 +35,12 @@ type Service struct {
 }
 
 type Result struct {
-	TransactionID int64
-	Status        string
+	TransactionID           int64
+	SourceID, DestinationID int64
+	Amount                  int64
+	IdempotencyKey          string
+	Status                  string
+	CreatedAt               time.Time
 }
 
 func New(s Storage) *Service {
@@ -62,10 +66,9 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 		_ = tx.Rollback(context.Background())
 	}()
 
-	transactionID, err := s.storage.CreateTransaction(ctx, tx, storage.Transaction{
+	created, err := s.storage.CreateTransaction(ctx, tx, storage.Transaction{
 		SourceID: fromAccountID, DestinationID: toAccountID, Amount: amount, IdempotencyKey: idempotencyKey,
 	})
-
 	if err != nil {
 
 		if errors.Is(err, storage.ErrDuplicateKey) {
@@ -78,7 +81,7 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 			if compareTransactions(storage.Transaction{SourceID: fromAccountID, DestinationID: toAccountID, Amount: amount,
 				IdempotencyKey: idempotencyKey}, prevTransaction) {
 
-				return &Result{TransactionID: prevTransaction.ID, Status: prevTransaction.Status}, nil
+				return newResult(prevTransaction), nil
 			}
 
 			// otherwise it's a error
@@ -119,12 +122,12 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 		return nil, ErrNotEnough
 	}
 
-	err = s.storage.CreateLedgerEntry(ctx, tx, transactionID, fromAccountID, -amount)
+	err = s.storage.CreateLedgerEntry(ctx, tx, created.ID, fromAccountID, -amount)
 	if err != nil {
 		return nil, err
 	}
 
-	err = s.storage.CreateLedgerEntry(ctx, tx, transactionID, toAccountID, amount)
+	err = s.storage.CreateLedgerEntry(ctx, tx, created.ID, toAccountID, amount)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +135,23 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 	commitCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	return &Result{TransactionID: transactionID, Status: "completed"}, tx.Commit(commitCtx)
+	if err := tx.Commit(commitCtx); err != nil {
+		return nil, err
+	}
+
+	return newResult(created), nil
+}
+
+func newResult(t storage.Transaction) *Result {
+	return &Result{
+		TransactionID:  t.ID,
+		SourceID:       t.SourceID,
+		DestinationID:  t.DestinationID,
+		Amount:         t.Amount,
+		IdempotencyKey: t.IdempotencyKey,
+		Status:         t.Status,
+		CreatedAt:      t.CreatedAt,
+	}
 }
 
 func compareTransactions(curr, prev storage.Transaction) bool {
