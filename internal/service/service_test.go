@@ -4,7 +4,9 @@ import (
 	"context"
 	"log"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -411,6 +413,181 @@ func TestTransferIdempotency(t *testing.T) {
 			require.Equal(t, 0, sumOfEntries)
 		})
 	}
+}
+
+func TestTranferConcurrentSameDirection(t *testing.T) {
+	pgPool := setupTest(t)
+	s := newTestService(pgPool)
+
+	// Initital state: alice balance = 1000, bob balance = 0
+	aliceID, err := createTestAccount(t.Context(), pgPool, "Alice", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, aliceID)
+
+	bobID, err := createTestAccount(t.Context(), pgPool, "Bob", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, bobID)
+
+	transactionID, err := createTestTransaction(t.Context(), pgPool, bobID, aliceID, 1000, "test_transaction")
+	require.NoError(t, err)
+	require.NotZero(t, transactionID)
+
+	aliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+	require.NoError(t, err)
+
+	bobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+	require.NoError(t, err)
+
+	// channel for receiving errors from Tranfer
+	errCh := make(chan error)
+
+	var (
+		wg        sync.WaitGroup
+		successes int
+		failures  int
+	)
+
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+
+			key := strconv.Itoa(n)
+			_, err := s.Transfer(t.Context(), aliceID, bobID, 100, key)
+			errCh <- err
+		}(i)
+	}
+
+	go func() {
+		wg.Wait()
+		close(errCh)
+	}()
+
+	for err := range errCh {
+		switch err {
+		case ErrNotEnough:
+			failures++
+		case nil:
+			successes++
+		default:
+			t.Fatalf("got unexpected error: %v", err)
+		}
+	}
+
+	// number of successull transactions with amount of 100 with initital balance = 1000
+	require.Equal(t, 10, successes)
+	// left number of fail transactions
+	require.Equal(t, 90, failures)
+
+	newAliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+	require.NoError(t, err)
+	require.Equal(t, aliceBalance-1000, newAliceBalance)
+
+	newBobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+	require.NoError(t, err)
+	require.Equal(t, bobBalance+1000, newBobBalance)
+
+	sumOfEntries, err := sumLedgerEntries(t.Context(), pgPool)
+	require.NoError(t, err)
+	require.Equal(t, 0, sumOfEntries)
+}
+
+func TestTranferConcurrentOppositeDirection(t *testing.T) {
+	pgPool := setupTest(t)
+	s := newTestService(pgPool)
+
+	aliceID, err := createTestAccount(t.Context(), pgPool, "Alice", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, aliceID)
+
+	bobID, err := createTestAccount(t.Context(), pgPool, "Bob", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, bobID)
+
+	// system account is the source of money entering the system
+	// Initital state: alice balance = 1000, bob balance = 1000
+	systemID, err := createTestAccount(t.Context(), pgPool, "System", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, systemID)
+
+	transactionID1, err := createTestTransaction(t.Context(), pgPool, systemID, aliceID, 1000, "test_transaction_1")
+	require.NoError(t, err)
+	require.NotZero(t, transactionID1)
+
+	transactionID2, err := createTestTransaction(t.Context(), pgPool, systemID, bobID, 1000, "test_transaction_2")
+	require.NoError(t, err)
+	require.NotZero(t, transactionID2)
+
+	type entry struct {
+		err       error
+		fromAlice bool
+	}
+
+	// channel for receiving errors from Tranfer
+	errCh := make(chan entry)
+
+	var (
+		wg             sync.WaitGroup
+		aliceSuccesses int
+		bobSuccesses   int
+	)
+
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+
+			key := strconv.Itoa(n)
+			_, err := s.Transfer(t.Context(), aliceID, bobID, 100, key)
+			errCh <- entry{err: err, fromAlice: true}
+		}(i)
+	}
+
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+
+			key := strconv.Itoa(n)
+			_, err := s.Transfer(t.Context(), bobID, aliceID, 100, key)
+			errCh <- entry{err: err, fromAlice: false}
+		}(i + 50)
+	}
+
+	go func() {
+		wg.Wait()
+		close(errCh)
+	}()
+
+	for e := range errCh {
+		switch e.err {
+		case ErrNotEnough:
+		case nil:
+			if e.fromAlice {
+				aliceSuccesses++
+			} else {
+				bobSuccesses++
+			}
+		default:
+			t.Fatalf("got unexpected error: %v", e.err)
+		}
+	}
+
+	sumOfEntries, err := sumLedgerEntries(t.Context(), pgPool)
+	require.NoError(t, err)
+	require.Equal(t, 0, sumOfEntries)
+
+	aliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1000-100*aliceSuccesses+100*bobSuccesses), aliceBalance)
+
+	bobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1000-100*bobSuccesses+100*aliceSuccesses), bobBalance)
+
+	// no transfer may push an account below zero
+	require.GreaterOrEqual(t, aliceBalance, int64(0))
+	require.GreaterOrEqual(t, bobBalance, int64(0))
 }
 
 func countLedgerEntries(ctx context.Context, tx storage.DBTX, transactionID int64) (int, error) {
