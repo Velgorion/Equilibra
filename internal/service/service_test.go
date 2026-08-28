@@ -308,6 +308,111 @@ func TestTransfer(t *testing.T) {
 	}
 }
 
+func TestTransferIdempotency(t *testing.T) {
+
+	const (
+		idemKey string = "key"
+	)
+
+	pgPool := setupTest(t)
+	s := newTestService(pgPool)
+
+	aliceID, err := createTestAccount(t.Context(), pgPool, "Alice", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, aliceID)
+
+	bobID, err := createTestAccount(t.Context(), pgPool, "Bob", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, bobID)
+
+	// create user "Vovan" for id mismatch in tests
+	vovanID, err := createTestAccount(t.Context(), pgPool, "Vovan", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, vovanID)
+
+	transactionID, err := createTestTransaction(t.Context(), pgPool, bobID, aliceID, 100, "test_transaction")
+	require.NoError(t, err)
+	require.NotZero(t, transactionID)
+
+	res, err := s.Transfer(t.Context(), aliceID, bobID, 99, idemKey)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	aliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+	require.NoError(t, err)
+
+	bobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name           string
+		from           int64
+		to             int64
+		amount         int64
+		idempotencyKey string
+		wantErr        error
+	}{
+		{
+			name:           "Same transaction",
+			from:           aliceID,
+			to:             bobID,
+			amount:         99,
+			idempotencyKey: idemKey,
+			wantErr:        nil,
+		},
+		{
+			name:           "Amount mismatch",
+			from:           aliceID,
+			to:             bobID,
+			amount:         88,
+			idempotencyKey: idemKey,
+			wantErr:        ErrTransactionsMismatch,
+		},
+		{
+			name:           "Destination mismatch",
+			from:           aliceID,
+			to:             vovanID,
+			amount:         99,
+			idempotencyKey: idemKey,
+			wantErr:        ErrTransactionsMismatch,
+		},
+		{
+			name:           "Source mismatch",
+			from:           vovanID,
+			to:             bobID,
+			amount:         99,
+			idempotencyKey: idemKey,
+			wantErr:        ErrTransactionsMismatch,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testRes, err := s.Transfer(t.Context(), tt.from, tt.to, tt.amount, tt.idempotencyKey)
+			require.ErrorIs(t, err, tt.wantErr)
+			if tt.wantErr == nil {
+				require.Equal(t, res, testRes)
+
+				againAliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+				require.NoError(t, err)
+				require.Equal(t, aliceBalance, againAliceBalance)
+
+				againBobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+				require.NoError(t, err)
+				require.Equal(t, bobBalance, againBobBalance)
+			}
+
+			countEntries, err := countLedgerEntries(t.Context(), pgPool, res.TransactionID)
+			require.NoError(t, err)
+			require.Equal(t, 2, countEntries)
+
+			sumOfEntries, err := sumLedgerEntries(t.Context(), pgPool)
+			require.NoError(t, err)
+			require.Equal(t, 0, sumOfEntries)
+		})
+	}
+}
+
 func countLedgerEntries(ctx context.Context, tx storage.DBTX, transactionID int64) (int, error) {
 	var count int
 
