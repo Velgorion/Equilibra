@@ -26,7 +26,6 @@ type Storage interface {
 	CreateTransaction(ctx context.Context, tx storage.DBTX, transaction storage.Transaction) (storage.Transaction, error)
 	CreateLedgerEntry(ctx context.Context, tx storage.DBTX, transactionID, accountID int64, amount int64) error
 	GetAccountCurrencyForUpdate(ctx context.Context, tx storage.DBTX, accountID int64) (string, error)
-	GetAccountCurrency(ctx context.Context, tx storage.DBTX, accountID int64) (string, error)
 	GetTransaction(ctx context.Context, tx storage.DBTX, idempotencyKey string) (storage.Transaction, error)
 }
 
@@ -66,6 +65,45 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 		_ = tx.Rollback(context.Background())
 	}()
 
+	// Implement ordered locking to prevent deadlock in case of concurrent and opposite transactions
+	first, second := min(fromAccountID, toAccountID), max(fromAccountID, toAccountID)
+
+	firstCurrency, err := s.storage.GetAccountCurrencyForUpdate(ctx, tx, first)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			if first == fromAccountID {
+				return nil, ErrSourceAccountNotFound
+			}
+			return nil, ErrDestinationAccountNotFound
+		}
+		return nil, fmt.Errorf("get source currency: %w", err)
+	}
+
+	secondCurrency, err := s.storage.GetAccountCurrencyForUpdate(ctx, tx, second)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			if second == fromAccountID {
+				return nil, ErrSourceAccountNotFound
+			}
+			return nil, ErrDestinationAccountNotFound
+		}
+		return nil, fmt.Errorf("get destination currency: %w", err)
+	}
+
+	var sourceCurrency, destinationCurrency string
+
+	if first == fromAccountID {
+		sourceCurrency = firstCurrency
+		destinationCurrency = secondCurrency
+	} else {
+		sourceCurrency = secondCurrency
+		destinationCurrency = firstCurrency
+	}
+
+	if sourceCurrency != destinationCurrency {
+		return nil, ErrCurrencyMismatch
+	}
+
 	created, err := s.storage.CreateTransaction(ctx, tx, storage.Transaction{
 		SourceID: fromAccountID, DestinationID: toAccountID, Amount: amount, IdempotencyKey: idempotencyKey,
 	})
@@ -89,26 +127,6 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 		}
 
 		return nil, err
-	}
-
-	destinationCurrency, err := s.storage.GetAccountCurrency(ctx, tx, toAccountID)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, ErrDestinationAccountNotFound
-		}
-		return nil, fmt.Errorf("get destination currency: %w", err)
-	}
-
-	sourceCurrency, err := s.storage.GetAccountCurrencyForUpdate(ctx, tx, fromAccountID)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, ErrSourceAccountNotFound
-		}
-		return nil, fmt.Errorf("get source currency: %w", err)
-	}
-
-	if sourceCurrency != destinationCurrency {
-		return nil, ErrCurrencyMismatch
 	}
 
 	balanceFrom, err := s.storage.GetAccountBalance(ctx, tx, fromAccountID)
