@@ -221,6 +221,16 @@ func TestTransfer(t *testing.T) {
 		return aliceID, strangerID
 	}
 
+	oneAccount := func(t *testing.T, pool *pgxpool.Pool) (from, to int64) {
+		aliceID, err := createTestAccount(t.Context(), pool, "Alice", "RUB")
+		require.NoError(t, err)
+		require.NotZero(t, aliceID)
+
+		const nonexistentID = 0
+
+		return aliceID, nonexistentID
+	}
+
 	tests := []struct {
 		name           string
 		amount         int64
@@ -262,6 +272,13 @@ func TestTransfer(t *testing.T) {
 			idempotencyKey: "key5",
 			setup:          sameCurrencies,
 			wantErr:        nil,
+		},
+		{
+			name:           "Nonexistent destination account with less id",
+			amount:         100,
+			idempotencyKey: "key6",
+			setup:          oneAccount,
+			wantErr:        ErrDestinationAccountNotFound,
 		},
 	}
 
