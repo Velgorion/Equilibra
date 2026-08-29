@@ -60,23 +60,6 @@ func (s *Storage) GetAccountCurrencyForUpdate(ctx context.Context, tx DBTX, acco
 	return currency, nil
 }
 
-func (s *Storage) GetAccountCurrency(ctx context.Context, tx DBTX, accountID int64) (string, error) {
-	var currency string
-
-	err := tx.QueryRow(ctx, `
-			SELECT currency FROM accounts WHERE id = $1;		
-	`, accountID).Scan(&currency)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrNotFound
-		}
-		return "", err
-	}
-
-	return currency, nil
-}
-
 func (s *Storage) GetAccountBalance(ctx context.Context, tx DBTX, accountID int64) (int64, error) {
 	var balance int64
 
@@ -120,6 +103,13 @@ func (s *Storage) GetTransaction(ctx context.Context, tx DBTX, idempotencyKey st
 			WHERE idempotency_key = $1;
 	`, idempotencyKey).Scan(&t.ID, &t.IdempotencyKey, &t.Status, &t.CreatedAt,
 		&t.SourceID, &t.DestinationID, &t.Amount)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Transaction{}, ErrNotFound
+		}
+		return Transaction{}, err
+	}
 
 	return t, err
 }
