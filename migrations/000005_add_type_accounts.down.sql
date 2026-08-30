@@ -1,0 +1,11 @@
+ALTER TABLE accounts
+DROP COLUMN IF EXISTS type,
+DROP COLUMN IF EXISTS code;
+
+ALTER TABLE transactions DROP COLUMN IF EXISTS type;
+
+ALTER TABLE transactions
+ALTER COLUMN source_id
+DROP NOT NULL,
+ALTER COLUMN destination_id
+DROP NOT NULL;
