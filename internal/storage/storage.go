@@ -33,6 +33,15 @@ type Transaction struct {
 	CreatedAt               time.Time
 }
 
+type Account struct {
+	ID        int64
+	Owner     string
+	Currency  string
+	Type      string
+	Code      string
+	CreatedAt time.Time
+}
+
 func New(db *pgxpool.Pool) *Storage {
 	return &Storage{
 		db: db,
@@ -43,21 +52,24 @@ func (s *Storage) BeginTx(ctx context.Context) (pgx.Tx, error) {
 	return s.db.BeginTx(ctx, pgx.TxOptions{})
 }
 
-func (s *Storage) GetAccountCurrencyForUpdate(ctx context.Context, tx DBTX, accountID int64) (string, error) {
-	var currency string
+func (s *Storage) GetAccountForUpdate(ctx context.Context, tx DBTX, accountID int64) (Account, error) {
+	var account Account
 
 	err := tx.QueryRow(ctx, `
-			SELECT currency FROM accounts WHERE id = $1 FOR UPDATE;		
-	`, accountID).Scan(&currency)
+			SELECT id, owner, currency, type, COALESCE(code, ''), created_at 
+			FROM accounts 
+			WHERE id = $1 FOR UPDATE;		
+	`, accountID).Scan(&account.ID, &account.Owner, &account.Currency,
+		&account.Type, &account.Code, &account.CreatedAt)
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrNotFound
+			return Account{}, ErrNotFound
 		}
-		return "", err
+		return Account{}, err
 	}
 
-	return currency, nil
+	return account, nil
 }
 
 func (s *Storage) GetAccountBalance(ctx context.Context, tx DBTX, accountID int64) (int64, error) {
@@ -111,7 +123,7 @@ func (s *Storage) GetTransaction(ctx context.Context, tx DBTX, idempotencyKey st
 		return Transaction{}, err
 	}
 
-	return t, err
+	return t, nil
 }
 
 func (s *Storage) CreateLedgerEntry(ctx context.Context, tx DBTX, transactionID, accountID int64, amount int64) error {
