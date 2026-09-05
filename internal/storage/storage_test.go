@@ -86,7 +86,12 @@ func setupTest(t *testing.T) *pgxpool.Pool {
 
 	// Clean tables before every test
 	_, err := testPool.Exec(t.Context(), `
-		TRUNCATE ledger_entries, transactions, accounts RESTART IDENTITY CASCADE;
+		TRUNCATE ledger_entries, transactions RESTART IDENTITY CASCADE;
+	`)
+	require.NoError(t, err)
+
+	_, err = testPool.Exec(t.Context(), `
+		DELETE FROM accounts WHERE type = 'user';
 	`)
 	require.NoError(t, err)
 
