@@ -15,7 +15,7 @@ var (
 	ErrDuplicateKey = errors.New("duplicate idempotency key")
 )
 
-type DBTX interface {
+type dbtx interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (commandTag pgconn.CommandTag, err error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
@@ -48,89 +48,28 @@ func New(db *pgxpool.Pool) *Storage {
 	}
 }
 
-func (s *Storage) BeginTx(ctx context.Context) (pgx.Tx, error) {
-	return s.db.BeginTx(ctx, pgx.TxOptions{})
-}
-
-func (s *Storage) GetAccountForUpdate(ctx context.Context, tx DBTX, accountID int64) (Account, error) {
-	var account Account
-
-	err := tx.QueryRow(ctx, `
-			SELECT id, owner, currency, type, COALESCE(code, ''), created_at 
-			FROM accounts 
-			WHERE id = $1 FOR UPDATE;		
-	`, accountID).Scan(&account.ID, &account.Owner, &account.Currency,
-		&account.Type, &account.Code, &account.CreatedAt)
-
+func (s *Storage) WithTx(ctx context.Context, fn func(q Querier) error) error {
+	// Create and begin database transaction
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Account{}, ErrNotFound
-		}
-		return Account{}, err
+		return err
 	}
 
-	return account, nil
-}
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 
-func (s *Storage) GetAccountBalance(ctx context.Context, tx DBTX, accountID int64) (int64, error) {
-	var balance int64
-
-	err := tx.QueryRow(ctx, `
-			SELECT COALESCE(SUM(amount), 0)
-			FROM ledger_entries
-			WHERE account_id = $1;
-	`, accountID).Scan(&balance)
-
-	return balance, err
-}
-
-func (s *Storage) CreateTransaction(ctx context.Context, tx DBTX, transaction Transaction) (Transaction, error) {
-	created := transaction
-	created.Status = "completed"
-
-	err := tx.QueryRow(ctx, `
-			INSERT INTO transactions (source_id, destination_id, amount, idempotency_key, status)
-			VALUES ($1, $2, $3, $4, 'completed')
-			ON CONFLICT (idempotency_key) DO NOTHING
-			RETURNING id, created_at;
-	`, transaction.SourceID, transaction.DestinationID, transaction.Amount,
-		transaction.IdempotencyKey).Scan(&created.ID, &created.CreatedAt)
-
+	// Fn receive "queries" type with tx inside and all necessary methods.
+	// All logic is encapsulated within "fn" function
+	err = fn(&queries{tx})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Transaction{}, ErrDuplicateKey
-		}
-		return Transaction{}, err
+		return err
 	}
 
-	return created, nil
-}
+	commitCtx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+	defer cancel()
 
-func (s *Storage) GetTransaction(ctx context.Context, tx DBTX, idempotencyKey string) (Transaction, error) {
-	var t Transaction
-
-	err := tx.QueryRow(ctx, `
-			SELECT id, idempotency_key, status, created_at, source_id, destination_id, amount
-			FROM transactions
-			WHERE idempotency_key = $1;
-	`, idempotencyKey).Scan(&t.ID, &t.IdempotencyKey, &t.Status, &t.CreatedAt,
-		&t.SourceID, &t.DestinationID, &t.Amount)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Transaction{}, ErrNotFound
-		}
-		return Transaction{}, err
-	}
-
-	return t, nil
-}
-
-func (s *Storage) CreateLedgerEntry(ctx context.Context, tx DBTX, transactionID, accountID int64, amount int64) error {
-	_, err := tx.Exec(ctx, `
-			INSERT INTO ledger_entries (transaction_id, account_id, amount)
-			VALUES ($1, $2, $3);
-	`, transactionID, accountID, amount)
-
-	return err
+	return tx.Commit(commitCtx)
 }
