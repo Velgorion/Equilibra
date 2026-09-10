@@ -53,9 +53,16 @@ func New(s Storage) *Service {
 func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64,
 	amount int64, idempotencyKey string) (*Result, error) {
 
+	if amount <= 0 {
+		return nil, ErrInvalidAmount
+	}
+
+	if fromAccountID == toAccountID {
+		return nil, ErrSameAccount
+	}
+
 	var res *Result
 	err := s.storage.WithTx(ctx, func(q storage.Querier) error {
-
 		fromAccount, err := q.GetAccount(ctx, fromAccountID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
@@ -87,7 +94,6 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 	})
 
 	return res, err
-
 }
 
 // Deposit create transaction with a system account as a source
@@ -95,9 +101,12 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 func (s *Service) Deposit(ctx context.Context, destinationID int64,
 	amount int64, source string, idempotencyKey string) (*Result, error) {
 
+	if amount <= 0 {
+		return nil, ErrInvalidAmount
+	}
+
 	var res *Result
 	err := s.storage.WithTx(ctx, func(q storage.Querier) error {
-
 		account, err := q.GetAccount(ctx, destinationID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
@@ -124,6 +133,10 @@ func (s *Service) Deposit(ctx context.Context, destinationID int64,
 			return ErrSystemAccountNotFound
 		}
 
+		if account.ID == sysAccount.ID {
+			return ErrSameAccount
+		}
+
 		result, err := s.transfer(ctx, q, sysAccount.ID, destinationID, amount, idempotencyKey)
 		if err != nil {
 			return err
@@ -142,9 +155,12 @@ func (s *Service) Deposit(ctx context.Context, destinationID int64,
 func (s *Service) Withdraw(ctx context.Context, sourceID int64,
 	amount int64, destination string, idempotencyKey string) (*Result, error) {
 
+	if amount <= 0 {
+		return nil, ErrInvalidAmount
+	}
+
 	var res *Result
 	err := s.storage.WithTx(ctx, func(q storage.Querier) error {
-
 		account, err := q.GetAccount(ctx, sourceID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
@@ -171,6 +187,10 @@ func (s *Service) Withdraw(ctx context.Context, sourceID int64,
 			return ErrSystemAccountNotFound
 		}
 
+		if account.ID != sysAccount.ID {
+			return ErrSameAccount
+		}
+
 		result, err := s.transfer(ctx, q, sysAccount.ID, sourceID, amount, idempotencyKey)
 		if err != nil {
 			return err
@@ -186,14 +206,6 @@ func (s *Service) Withdraw(ctx context.Context, sourceID int64,
 
 func (s *Service) transfer(ctx context.Context, q storage.Querier, fromAccountID, toAccountID int64,
 	amount int64, idempotencyKey string) (*Result, error) {
-
-	if amount <= 0 {
-		return nil, ErrInvalidAmount
-	}
-
-	if fromAccountID == toAccountID {
-		return nil, ErrSameAccount
-	}
 
 	// Implement ordered locking to prevent deadlock in case of concurrent and opposite transactions
 	first, second := min(fromAccountID, toAccountID), max(fromAccountID, toAccountID)
