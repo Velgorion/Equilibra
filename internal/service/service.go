@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/Velgorion/equilibra/internal/storage"
-	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -18,15 +17,19 @@ var (
 	ErrSourceAccountNotFound      = errors.New("source account not found")
 	ErrDestinationAccountNotFound = errors.New("destination account not found")
 	ErrTransactionsMismatch       = errors.New("values in the transaction with the same idempotencyKey have changed")
+	ErrSystemAccountNotAllowed    = errors.New("the transfer takes place only between users")
+	ErrInvalidDepositDestination  = errors.New("destination account in deposit operation must be user type")
+	ErrInvalidDepositSource       = errors.New("source account in deposit operation must be user type")
+	ErrSystemAccountNotFound      = errors.New("the system account not found")
+)
+
+const (
+	accountTypeUser   = "user"
+	accountTypeSystem = "system"
 )
 
 type Storage interface {
-	BeginTx(ctx context.Context) (pgx.Tx, error)
-	GetAccountBalance(ctx context.Context, tx storage.DBTX, accountID int64) (int64, error)
-	CreateTransaction(ctx context.Context, tx storage.DBTX, transaction storage.Transaction) (storage.Transaction, error)
-	CreateLedgerEntry(ctx context.Context, tx storage.DBTX, transactionID, accountID int64, amount int64) error
-	GetAccountCurrencyForUpdate(ctx context.Context, tx storage.DBTX, accountID int64) (string, error)
-	GetTransaction(ctx context.Context, tx storage.DBTX, idempotencyKey string) (storage.Transaction, error)
+	WithTx(ctx context.Context, fn func(q storage.Querier) error) error
 }
 
 type Service struct {
@@ -46,7 +49,142 @@ func New(s Storage) *Service {
 	return &Service{storage: s}
 }
 
+// Transfer create transaction between two user type accounts
 func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64,
+	amount int64, idempotencyKey string) (*Result, error) {
+
+	var res *Result
+	err := s.storage.WithTx(ctx, func(q storage.Querier) error {
+
+		fromAccount, err := q.GetAccount(ctx, fromAccountID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return ErrSourceAccountNotFound
+			}
+			return err
+		}
+
+		toAccount, err := q.GetAccount(ctx, toAccountID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return ErrDestinationAccountNotFound
+			}
+			return err
+		}
+
+		if fromAccount.Type != accountTypeUser || toAccount.Type != accountTypeUser {
+			return ErrSystemAccountNotAllowed
+		}
+
+		result, err := s.transfer(ctx, q, fromAccountID, toAccountID, amount, idempotencyKey)
+		if err != nil {
+			return err
+		}
+
+		res = result
+
+		return err
+	})
+
+	return res, err
+
+}
+
+// Deposit create transaction with a system account as a source
+// source parameter to identify the source of the transaction ("ATM" or "BANK")
+func (s *Service) Deposit(ctx context.Context, destinationID int64,
+	amount int64, source string, idempotencyKey string) (*Result, error) {
+
+	var res *Result
+	err := s.storage.WithTx(ctx, func(q storage.Querier) error {
+
+		account, err := q.GetAccount(ctx, destinationID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return ErrDestinationAccountNotFound
+			}
+			return err
+		}
+
+		if account.Type != accountTypeUser {
+			return ErrInvalidDepositDestination
+		}
+
+		sysAccountCode := source + "_IN_" + account.Currency
+
+		sysAccount, err := q.GetSystemAccountByCode(ctx, sysAccountCode)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return ErrSystemAccountNotFound
+			}
+			return err
+		}
+
+		if sysAccount.Type != accountTypeSystem {
+			return ErrSystemAccountNotFound
+		}
+
+		result, err := s.transfer(ctx, q, sysAccount.ID, destinationID, amount, idempotencyKey)
+		if err != nil {
+			return err
+		}
+
+		res = result
+
+		return err
+	})
+
+	return res, err
+}
+
+// Withdraw create transaction with a system account as a destination
+// destination parameter to identify the destination of the transaction ("ATM" or "BANK")
+func (s *Service) Withdraw(ctx context.Context, sourceID int64,
+	amount int64, destination string, idempotencyKey string) (*Result, error) {
+
+	var res *Result
+	err := s.storage.WithTx(ctx, func(q storage.Querier) error {
+
+		account, err := q.GetAccount(ctx, sourceID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return ErrSourceAccountNotFound
+			}
+			return err
+		}
+
+		if account.Type != accountTypeUser {
+			return ErrInvalidDepositSource
+		}
+
+		sysAccountCode := destination + "_IN_" + account.Currency
+
+		sysAccount, err := q.GetSystemAccountByCode(ctx, sysAccountCode)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return ErrSystemAccountNotFound
+			}
+			return err
+		}
+
+		if sysAccount.Type != accountTypeSystem {
+			return ErrSystemAccountNotFound
+		}
+
+		result, err := s.transfer(ctx, q, sysAccount.ID, sourceID, amount, idempotencyKey)
+		if err != nil {
+			return err
+		}
+
+		res = result
+
+		return err
+	})
+
+	return res, err
+}
+
+func (s *Service) transfer(ctx context.Context, q storage.Querier, fromAccountID, toAccountID int64,
 	amount int64, idempotencyKey string) (*Result, error) {
 
 	if amount <= 0 {
@@ -57,18 +195,10 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 		return nil, ErrSameAccount
 	}
 
-	tx, err := s.storage.BeginTx(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = tx.Rollback(context.Background())
-	}()
-
 	// Implement ordered locking to prevent deadlock in case of concurrent and opposite transactions
 	first, second := min(fromAccountID, toAccountID), max(fromAccountID, toAccountID)
 
-	firstCurrency, err := s.storage.GetAccountCurrencyForUpdate(ctx, tx, first)
+	firstAccount, err := q.GetAccountForUpdate(ctx, first)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			if first == fromAccountID {
@@ -76,10 +206,10 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 			}
 			return nil, ErrDestinationAccountNotFound
 		}
-		return nil, fmt.Errorf("get source currency: %w", err)
+		return nil, fmt.Errorf("lock account %d: %w", first, err)
 	}
 
-	secondCurrency, err := s.storage.GetAccountCurrencyForUpdate(ctx, tx, second)
+	secondAccount, err := q.GetAccountForUpdate(ctx, second)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			if second == fromAccountID {
@@ -87,30 +217,24 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 			}
 			return nil, ErrDestinationAccountNotFound
 		}
-		return nil, fmt.Errorf("get destination currency: %w", err)
+		return nil, fmt.Errorf("lock account %d: %w", second, err)
 	}
 
-	var sourceCurrency, destinationCurrency string
-
-	if first == fromAccountID {
-		sourceCurrency = firstCurrency
-		destinationCurrency = secondCurrency
-	} else {
-		sourceCurrency = secondCurrency
-		destinationCurrency = firstCurrency
+	sourceAccount, destinationAccount := firstAccount, secondAccount
+	if first != fromAccountID {
+		sourceAccount, destinationAccount = secondAccount, firstAccount
 	}
 
-	if sourceCurrency != destinationCurrency {
+	if sourceAccount.Currency != destinationAccount.Currency {
 		return nil, ErrCurrencyMismatch
 	}
 
-	created, err := s.storage.CreateTransaction(ctx, tx, storage.Transaction{
+	created, err := q.CreateTransaction(ctx, storage.Transaction{
 		SourceID: fromAccountID, DestinationID: toAccountID, Amount: amount, IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
-
 		if errors.Is(err, storage.ErrDuplicateKey) {
-			prevTransaction, err := s.storage.GetTransaction(ctx, tx, idempotencyKey)
+			prevTransaction, err := q.GetTransaction(ctx, idempotencyKey)
 			if err != nil {
 				return nil, err
 			}
@@ -129,31 +253,20 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 		return nil, err
 	}
 
-	balanceFrom, err := s.storage.GetAccountBalance(ctx, tx, fromAccountID)
+	balanceFrom, err := q.GetAccountBalance(ctx, fromAccountID)
 	if err != nil {
 		return nil, err
 	}
 
-	newBalance := balanceFrom - amount
-
-	if newBalance < 0 {
+	if balanceFrom-amount < 0 {
 		return nil, ErrNotEnough
 	}
 
-	err = s.storage.CreateLedgerEntry(ctx, tx, created.ID, fromAccountID, -amount)
-	if err != nil {
+	if err := q.CreateLedgerEntry(ctx, created.ID, fromAccountID, -amount); err != nil {
 		return nil, err
 	}
 
-	err = s.storage.CreateLedgerEntry(ctx, tx, created.ID, toAccountID, amount)
-	if err != nil {
-		return nil, err
-	}
-
-	commitCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	if err := tx.Commit(commitCtx); err != nil {
+	if err := q.CreateLedgerEntry(ctx, created.ID, toAccountID, amount); err != nil {
 		return nil, err
 	}
 
