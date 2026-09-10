@@ -132,10 +132,10 @@ func newTestService(pool *pgxpool.Pool) *Service {
 	}
 }
 
-func createTestAccount(ctx context.Context, tx storage.DBTX, owner, currency string) (int64, error) {
+func createTestAccount(ctx context.Context, pool *pgxpool.Pool, owner, currency string) (int64, error) {
 	var id int64
 
-	err := tx.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
 		INSERT INTO accounts (owner, currency)
 		VALUES ($1, $2)
 		RETURNING id;
@@ -144,12 +144,12 @@ func createTestAccount(ctx context.Context, tx storage.DBTX, owner, currency str
 	return id, err
 }
 
-func createTestTransaction(ctx context.Context, tx storage.DBTX,
+func createTestTransaction(ctx context.Context, pool *pgxpool.Pool,
 	sourceID, destinationID int64, amount int64, idempotencyKey string) (int64, error) {
 
 	var id int64
 
-	err := tx.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
 			INSERT INTO transactions (source_id, destination_id, amount, idempotency_key, status)
 			VALUES ($1, $2, $3, $4, 'completed')
 			RETURNING id;
@@ -159,7 +159,7 @@ func createTestTransaction(ctx context.Context, tx storage.DBTX,
 		return 0, err
 	}
 
-	_, err = tx.Exec(ctx, `
+	_, err = pool.Exec(ctx, `
 			INSERT INTO ledger_entries (transaction_id, account_id, amount)
 			VALUES ($1, $2, $3);
 	`, id, destinationID, amount)
@@ -168,7 +168,7 @@ func createTestTransaction(ctx context.Context, tx storage.DBTX,
 		return 0, err
 	}
 
-	_, err = tx.Exec(ctx, `
+	_, err = pool.Exec(ctx, `
 			INSERT INTO ledger_entries (transaction_id, account_id, amount)
 			VALUES ($1, $2, $3);
 	`, id, sourceID, -amount)
@@ -293,10 +293,10 @@ func TestTransfer(t *testing.T) {
 			from, to := tt.setup(t, pgPool)
 			s := newTestService(pgPool)
 
-			oldBalanceFrom, err := s.storage.GetAccountBalance(t.Context(), pgPool, from)
+			oldBalanceFrom, err := balanceOf(t, s.storage, from)
 			require.NoError(t, err)
 
-			oldBalanceTo, err := s.storage.GetAccountBalance(t.Context(), pgPool, to)
+			oldBalanceTo, err := balanceOf(t, s.storage, to)
 			require.NoError(t, err)
 
 			res, err := s.Transfer(t.Context(), from, to, tt.amount, tt.idempotencyKey)
@@ -311,11 +311,11 @@ func TestTransfer(t *testing.T) {
 			require.Equal(t, tt.amount, res.Amount)
 			require.Equal(t, tt.idempotencyKey, res.IdempotencyKey)
 
-			newBalanceFrom, err := s.storage.GetAccountBalance(t.Context(), pgPool, from)
+			newBalanceFrom, err := balanceOf(t, s.storage, from)
 			require.NoError(t, err)
 			require.Equal(t, oldBalanceFrom-res.Amount, newBalanceFrom)
 
-			newBalanceTo, err := s.storage.GetAccountBalance(t.Context(), pgPool, to)
+			newBalanceTo, err := balanceOf(t, s.storage, to)
 			require.NoError(t, err)
 			require.Equal(t, oldBalanceTo+res.Amount, newBalanceTo)
 
@@ -362,10 +362,10 @@ func TestTransferIdempotency(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res)
 
-	aliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+	aliceBalance, err := balanceOf(t, s.storage, aliceID)
 	require.NoError(t, err)
 
-	bobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+	bobBalance, err := balanceOf(t, s.storage, bobID)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -417,11 +417,11 @@ func TestTransferIdempotency(t *testing.T) {
 			if tt.wantErr == nil {
 				require.Equal(t, res, testRes)
 
-				againAliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+				againAliceBalance, err := balanceOf(t, s.storage, aliceID)
 				require.NoError(t, err)
 				require.Equal(t, aliceBalance, againAliceBalance)
 
-				againBobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+				againBobBalance, err := balanceOf(t, s.storage, bobID)
 				require.NoError(t, err)
 				require.Equal(t, bobBalance, againBobBalance)
 			}
@@ -454,10 +454,10 @@ func TestTranferConcurrentSameDirection(t *testing.T) {
 	require.NoError(t, err)
 	require.NotZero(t, transactionID)
 
-	aliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+	aliceBalance, err := balanceOf(t, s.storage, aliceID)
 	require.NoError(t, err)
 
-	bobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+	bobBalance, err := balanceOf(t, s.storage, bobID)
 	require.NoError(t, err)
 
 	// channel for receiving errors from Tranfer
@@ -501,11 +501,11 @@ func TestTranferConcurrentSameDirection(t *testing.T) {
 	// left number of fail transactions
 	require.Equal(t, 90, failures)
 
-	newAliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+	newAliceBalance, err := balanceOf(t, s.storage, aliceID)
 	require.NoError(t, err)
 	require.Equal(t, aliceBalance-1000, newAliceBalance)
 
-	newBobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+	newBobBalance, err := balanceOf(t, s.storage, bobID)
 	require.NoError(t, err)
 	require.Equal(t, bobBalance+1000, newBobBalance)
 
@@ -599,11 +599,11 @@ func TestTranferConcurrentOppositeDirection(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, sumOfEntries)
 
-	aliceBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, aliceID)
+	aliceBalance, err := balanceOf(t, s.storage, aliceID)
 	require.NoError(t, err)
 	require.Equal(t, int64(1000-100*aliceSuccesses+100*bobSuccesses), aliceBalance)
 
-	bobBalance, err := s.storage.GetAccountBalance(t.Context(), pgPool, bobID)
+	bobBalance, err := balanceOf(t, s.storage, bobID)
 	require.NoError(t, err)
 	require.Equal(t, int64(1000-100*bobSuccesses+100*aliceSuccesses), bobBalance)
 
@@ -612,10 +612,25 @@ func TestTranferConcurrentOppositeDirection(t *testing.T) {
 	require.GreaterOrEqual(t, bobBalance, int64(0))
 }
 
-func countLedgerEntries(ctx context.Context, tx storage.DBTX, transactionID int64) (int, error) {
+func balanceOf(t *testing.T, store Storage, id int64) (int64, error) {
+	var balance int64
+	err := store.WithTx(t.Context(), func(q storage.Querier) error {
+		var err error
+		balance, err = q.GetAccountBalance(t.Context(), id)
+		return err
+	})
+
+	if err != nil {
+		return 0, err
+	}
+
+	return balance, nil
+}
+
+func countLedgerEntries(ctx context.Context, pool *pgxpool.Pool, transactionID int64) (int, error) {
 	var count int
 
-	err := tx.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
 		SELECT count(*)
 		FROM ledger_entries
 		WHERE transaction_id = $1;
@@ -624,10 +639,10 @@ func countLedgerEntries(ctx context.Context, tx storage.DBTX, transactionID int6
 	return count, err
 }
 
-func sumLedgerEntries(ctx context.Context, tx storage.DBTX) (int, error) {
+func sumLedgerEntries(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	var sum int
 
-	err := tx.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(amount), 0)
 		FROM ledger_entries;
 	`).Scan(&sum)

@@ -121,16 +121,22 @@ func openTestDB(dsn string) (*pgxpool.Pool, error) {
 	return dbpool, nil
 }
 
-func CreateTestAccount(ctx context.Context, tx DBTX, owner, currency string) (int64, error) {
+func CreateTestAccount(ctx context.Context, pool *pgxpool.Pool, owner, currency string) (int64, error) {
 	var id int64
 
-	err := tx.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
 		INSERT INTO accounts (owner, currency)
 		VALUES ($1, $2)
 		RETURNING id;
 	`, owner, currency).Scan(&id)
 
 	return id, err
+}
+
+func query(t *testing.T, store *Storage, fn func(q Querier) error) error {
+	t.Helper()
+
+	return store.WithTx(t.Context(), fn)
 }
 
 func TestGetAccountBalanceOnEmptyAccount(t *testing.T) {
@@ -141,7 +147,12 @@ func TestGetAccountBalanceOnEmptyAccount(t *testing.T) {
 	require.NoError(t, err)
 
 	// SUM over zero rows is NULL, so COALESCE must turn it into 0 instead of failing
-	balance, err := store.GetAccountBalance(t.Context(), pgPool, accountID)
+	var balance int64
+	err = query(t, store, func(q Querier) error {
+		var err error
+		balance, err = q.GetAccountBalance(t.Context(), accountID)
+		return err
+	})
 	require.NoError(t, err)
 	require.Equal(t, int64(0), balance)
 }
@@ -163,13 +174,21 @@ func TestCreateTransactionDuplicateKey(t *testing.T) {
 		IdempotencyKey: "duplicate",
 	}
 
-	created, err := store.CreateTransaction(t.Context(), pgPool, transaction)
+	var created Transaction
+	err = query(t, store, func(q Querier) error {
+		var err error
+		created, err = q.CreateTransaction(t.Context(), transaction)
+		return err
+	})
 	require.NoError(t, err)
 	require.NotZero(t, created.ID)
 	require.NotZero(t, created.CreatedAt)
 
 	// ON CONFLICT DO NOTHING returns no rows, so function must return the ErrDuplicateKey
-	_, err = store.CreateTransaction(t.Context(), pgPool, transaction)
+	err = query(t, store, func(q Querier) error {
+		_, err := q.CreateTransaction(t.Context(), transaction)
+		return err
+	})
 	require.ErrorIs(t, err, ErrDuplicateKey)
 }
 
@@ -177,6 +196,9 @@ func TestGetTransactionNotFound(t *testing.T) {
 	pgPool := setupTest(t)
 	store := New(pgPool)
 
-	_, err := store.GetTransaction(t.Context(), pgPool, "missing")
+	err := query(t, store, func(q Querier) error {
+		_, err := q.GetTransaction(t.Context(), "missing")
+		return err
+	})
 	require.ErrorIs(t, err, ErrNotFound)
 }
