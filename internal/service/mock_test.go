@@ -13,17 +13,23 @@ import (
 type mockQuerier struct {
 	t *testing.T
 
-	getAccountFn             func(ctx context.Context, id int64) (storage.Account, error)
-	getAccountForUpdateFn    func(ctx context.Context, id int64) (storage.Account, error)
-	getAccountBalanceFn      func(ctx context.Context, id int64) (int64, error)
-	getSystemAccountByCodeFn func(ctx context.Context, code string) (storage.Account, error)
-	createTransactionFn      func(ctx context.Context, t storage.Transaction) (storage.Transaction, error)
-	getTransactionFn         func(ctx context.Context, key string) (storage.Transaction, error)
-	createLedgerEntryFn      func(ctx context.Context, transactionID, accountID, amount int64) error
+	getAccountFn              func(ctx context.Context, id int64) (storage.Account, error)
+	getAccountForUpdateFn     func(ctx context.Context, id int64) (storage.Account, error)
+	getAccountBalanceFn       func(ctx context.Context, id int64) (int64, error)
+	getSystemAccountByCodeFn  func(ctx context.Context, code string) (storage.Account, error)
+	createTransactionFn       func(ctx context.Context, t storage.Transaction) (storage.Transaction, error)
+	getTransactionFn          func(ctx context.Context, key string) (storage.Transaction, error)
+	getTransactionByIDFn      func(ctx context.Context, transactionID int64) (storage.Transaction, error)
+	createLedgerEntryFn       func(ctx context.Context, transactionID, accountID, amount int64) error
+	updateTransactionStatusFn func(ctx context.Context, transactionID int64, status string) error
 
 	// ledgerEntries records every entry written, so a test can assert that a
 	// rejected operation moved no money at all.
 	ledgerEntries []ledgerEntry
+
+	// statusUpdates records every status change, so a test can assert that a
+	// reversal marked its original transaction and nothing else.
+	statusUpdates []statusUpdate
 }
 
 var _ storage.Querier = (*mockQuerier)(nil)
@@ -34,7 +40,10 @@ type ledgerEntry struct {
 	Amount        int64
 }
 
-var _ storage.Querier = (*mockQuerier)(nil)
+type statusUpdate struct {
+	TransactionID int64
+	Status        string
+}
 
 func (m *mockQuerier) GetAccount(ctx context.Context, id int64) (storage.Account, error) {
 	if m.getAccountFn == nil {
@@ -82,6 +91,24 @@ func (m *mockQuerier) GetTransaction(ctx context.Context, key string) (storage.T
 	}
 
 	return m.getTransactionFn(ctx, key)
+}
+
+func (m *mockQuerier) GetTransactionByID(ctx context.Context, transactionID int64) (storage.Transaction, error) {
+	if m.getTransactionByIDFn == nil {
+		m.t.Fatalf("unexpected call: GetTransactionByID(%d)", transactionID)
+	}
+
+	return m.getTransactionByIDFn(ctx, transactionID)
+}
+
+func (m *mockQuerier) UpdateTransactionStatus(ctx context.Context, transactionID int64, status string) error {
+	m.statusUpdates = append(m.statusUpdates, statusUpdate{transactionID, status})
+
+	if m.updateTransactionStatusFn == nil {
+		return nil
+	}
+
+	return m.updateTransactionStatusFn(ctx, transactionID, status)
 }
 
 func (m *mockQuerier) CreateLedgerEntry(ctx context.Context, transactionID, accountID, amount int64) error {
@@ -228,4 +255,118 @@ func TestUnitDeposit(t *testing.T) {
 	require.Len(t, q.ledgerEntries, 2)
 	require.Equal(t, int64(-100), q.ledgerEntries[0].Amount)
 	require.Equal(t, int64(100), q.ledgerEntries[1].Amount)
+}
+
+func TestUnitReverseErrors(t *testing.T) {
+	const (
+		reversedID = int64(1)
+		reversalID = int64(2)
+		missingID  = int64(3)
+	)
+
+	tests := []struct {
+		name    string
+		id      int64
+		wantErr error
+	}{
+		{
+			name:    "Already reversed",
+			id:      reversedID,
+			wantErr: ErrReverseIncompletedTx,
+		},
+		{
+			name:    "Reversal of a reversal",
+			id:      reversalID,
+			wantErr: ErrReverseReversalTx,
+		},
+		{
+			name:    "Transaction does not exist",
+			id:      missingID,
+			wantErr: ErrTransactionNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, q, st := newMockService(t)
+
+			q.getTransactionByIDFn = func(ctx context.Context, transactionID int64) (storage.Transaction, error) {
+				switch transactionID {
+				case reversedID:
+					return storage.Transaction{Status: txStatusReversed, Type: txTypeTransfer}, nil
+				case reversalID:
+					return storage.Transaction{Status: txStatusCompleted, Type: txTypeReversal}, nil
+				default:
+					return storage.Transaction{}, ErrTransactionNotFound
+				}
+			}
+
+			res, err := s.Reverse(t.Context(), tt.id, "key")
+
+			require.ErrorIs(t, err, tt.wantErr)
+			require.Nil(t, res)
+			require.False(t, st.committed)
+			require.Empty(t, q.ledgerEntries)
+			require.Empty(t, q.statusUpdates)
+		})
+	}
+}
+
+func TestUnitReverse(t *testing.T) {
+	s, q, st := newMockService(t)
+
+	const (
+		sourceAccount      = int64(20)
+		destinationAccount = int64(21)
+
+		originalTransactionID = int64(1)
+		reversalTransactionID = int64(99)
+	)
+
+	q.getTransactionByIDFn = func(ctx context.Context, transactionID int64) (storage.Transaction, error) {
+		return storage.Transaction{ID: originalTransactionID,
+			SourceID:       sourceAccount,
+			DestinationID:  destinationAccount,
+			Amount:         100,
+			IdempotencyKey: "key",
+			Status:         txStatusCompleted,
+			Type:           txTypeTransfer,
+		}, nil
+	}
+
+	q.getAccountForUpdateFn = func(ctx context.Context, id int64) (storage.Account, error) {
+		return storage.Account{ID: id, Currency: "RUB"}, nil
+	}
+
+	q.createTransactionFn = func(ctx context.Context, tr storage.Transaction) (storage.Transaction, error) {
+		tr.ID = reversalTransactionID
+		tr.Status = txStatusCompleted
+		return tr, nil
+	}
+
+	q.getAccountBalanceFn = func(ctx context.Context, id int64) (int64, error) {
+		return 1000, nil
+	}
+
+	res, err := s.Reverse(t.Context(), originalTransactionID, "key")
+	require.NoError(t, err)
+	require.True(t, st.committed)
+
+	require.Equal(t, reversalTransactionID, res.TransactionID)
+	require.Equal(t, txTypeReversal, res.Type)
+
+	// During the reversal operation the destination account must become
+	// the source account, and vice versa.
+	require.Equal(t, sourceAccount, res.DestinationID)
+	require.Equal(t, destinationAccount, res.SourceID)
+
+	require.Equal(t, []ledgerEntry{
+		{TransactionID: reversalTransactionID, AccountID: destinationAccount, Amount: -100},
+		{TransactionID: reversalTransactionID, AccountID: sourceAccount, Amount: 100},
+	}, q.ledgerEntries)
+
+	// the status is written to the original transaction
+	require.Equal(t, []statusUpdate{
+		{TransactionID: originalTransactionID, Status: txStatusReversed},
+	}, q.statusUpdates)
 }

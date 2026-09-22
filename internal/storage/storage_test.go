@@ -172,6 +172,7 @@ func TestCreateTransactionDuplicateKey(t *testing.T) {
 		DestinationID:  destinationID,
 		Amount:         100,
 		IdempotencyKey: "duplicate",
+		Type:           "transfer",
 	}
 
 	var created Transaction
