@@ -16,16 +16,29 @@ var (
 	ErrCurrencyMismatch           = errors.New("the currencies of the accounts do not match")
 	ErrSourceAccountNotFound      = errors.New("source account not found")
 	ErrDestinationAccountNotFound = errors.New("destination account not found")
+	ErrTransactionNotFound        = errors.New("transaction not found")
 	ErrTransactionsMismatch       = errors.New("values in the transaction with the same idempotencyKey have changed")
 	ErrSystemAccountNotAllowed    = errors.New("the transfer takes place only between users")
 	ErrInvalidDepositDestination  = errors.New("destination account in deposit operation must be user type")
-	ErrInvalidDepositSource       = errors.New("source account in deposit operation must be user type")
+	ErrInvalidWithdrawSource      = errors.New("source account in withdraw operation must be user type")
 	ErrSystemAccountNotFound      = errors.New("the system account not found")
+	ErrReverseIncompletedTx       = errors.New("it is not possible to reverse the incompleted transaction")
+	ErrReverseReversalTx          = errors.New("it is not possible to reverse the transaction of type 'reversal'")
 )
 
 const (
 	accountTypeUser   = "user"
 	accountTypeSystem = "system"
+
+	txTypeWithdrawal = "withdrawal"
+	txTypeDeposit    = "deposit"
+	txTypeTransfer   = "transfer"
+	txTypeReversal   = "reversal"
+
+	txStatusPending   = "pending"
+	txStatusCompleted = "completed"
+	txStatusReversed  = "reversed"
+	txStatusFailed    = "failed"
 )
 
 type Storage interface {
@@ -54,6 +67,7 @@ type Result struct {
 	Amount                  int64
 	IdempotencyKey          string
 	Status                  string
+	Type                    string
 	CreatedAt               time.Time
 }
 
@@ -95,7 +109,10 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 			return ErrSystemAccountNotAllowed
 		}
 
-		result, err := s.transfer(ctx, q, fromAccountID, toAccountID, amount, idempotencyKey)
+		result, err := s.transfer(ctx, q, transferParams{
+			From: fromAccountID, To: toAccountID, Amount: amount,
+			Type: txTypeTransfer, IdempotencyKey: idempotencyKey,
+		})
 		if err != nil {
 			return err
 		}
@@ -149,7 +166,10 @@ func (s *Service) Deposit(ctx context.Context, destinationID int64,
 			return ErrSameAccount
 		}
 
-		result, err := s.transfer(ctx, q, sysAccount.ID, destinationID, amount, idempotencyKey)
+		result, err := s.transfer(ctx, q, transferParams{
+			From: sysAccount.ID, To: destinationID, Amount: amount,
+			Type: txTypeDeposit, IdempotencyKey: idempotencyKey,
+		})
 		if err != nil {
 			return err
 		}
@@ -182,10 +202,10 @@ func (s *Service) Withdraw(ctx context.Context, sourceID int64,
 		}
 
 		if account.Type != accountTypeUser {
-			return ErrInvalidDepositSource
+			return ErrInvalidWithdrawSource
 		}
 
-		sysAccountCode := destination + "_IN_" + account.Currency
+		sysAccountCode := destination + "_OUT_" + account.Currency
 
 		sysAccount, err := q.GetSystemAccountByCode(ctx, sysAccountCode)
 		if err != nil {
@@ -199,11 +219,14 @@ func (s *Service) Withdraw(ctx context.Context, sourceID int64,
 			return ErrSystemAccountNotFound
 		}
 
-		if account.ID != sysAccount.ID {
+		if account.ID == sysAccount.ID {
 			return ErrSameAccount
 		}
 
-		result, err := s.transfer(ctx, q, sysAccount.ID, sourceID, amount, idempotencyKey)
+		result, err := s.transfer(ctx, q, transferParams{
+			From: sourceID, To: sysAccount.ID, Amount: amount,
+			Type: txTypeWithdrawal, IdempotencyKey: idempotencyKey,
+		})
 		if err != nil {
 			return err
 		}
@@ -216,8 +239,56 @@ func (s *Service) Withdraw(ctx context.Context, sourceID int64,
 	return res, err
 }
 
-func (s *Service) transfer(ctx context.Context, q storage.Querier, fromAccountID, toAccountID int64,
-	amount int64, idempotencyKey string) (*Result, error) {
+// Reverse reverses the transaction by creating two ledger entries
+// with values ​​opposite to those of the transaction.
+func (s *Service) Reverse(ctx context.Context, transactionID int64,
+	idempotencyKey string) (*Result, error) {
+
+	var res *Result
+	err := s.storage.WithTx(ctx, func(q storage.Querier) error {
+
+		tx, err := q.GetTransactionByID(ctx, transactionID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return ErrTransactionNotFound
+			}
+			return err
+		}
+
+		if tx.Status != txStatusCompleted {
+			return ErrReverseIncompletedTx
+		}
+
+		if tx.Type == txTypeReversal {
+			return ErrReverseReversalTx
+		}
+
+		// call transfer with reversed id's
+		// a reversal moves the money back, so the accounts swap roles
+		res, err = s.transfer(ctx, q, transferParams{
+			From: tx.DestinationID, To: tx.SourceID, Amount: tx.Amount,
+			Type: txTypeReversal, IdempotencyKey: idempotencyKey,
+			ReversalOf: &tx.ID,
+		})
+
+		if err != nil {
+			return err
+		}
+
+		if err := q.UpdateTransactionStatus(ctx, transactionID, txStatusReversed); err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	return res, err
+
+}
+
+func (s *Service) transfer(ctx context.Context, q storage.Querier, p transferParams) (*Result, error) {
+	fromAccountID, toAccountID := p.From, p.To
+	amount, txType, idempotencyKey, reversalOf := p.Amount, p.Type, p.IdempotencyKey, p.ReversalOf
 
 	// Implement ordered locking to prevent deadlock in case of concurrent and opposite transactions
 	first, second := min(fromAccountID, toAccountID), max(fromAccountID, toAccountID)
@@ -254,7 +325,8 @@ func (s *Service) transfer(ctx context.Context, q storage.Querier, fromAccountID
 	}
 
 	created, err := q.CreateTransaction(ctx, storage.Transaction{
-		SourceID: fromAccountID, DestinationID: toAccountID, Amount: amount, IdempotencyKey: idempotencyKey,
+		SourceID: fromAccountID, DestinationID: toAccountID, Amount: amount,
+		IdempotencyKey: idempotencyKey, Type: txType, ReversalOf: reversalOf,
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrDuplicateKey) {
@@ -283,7 +355,12 @@ func (s *Service) transfer(ctx context.Context, q storage.Querier, fromAccountID
 	}
 
 	if balanceFrom-amount < 0 {
-		return nil, ErrNotEnough
+		// allow a negative balance if the source account type is system (another bank or "ATM")
+		// or if the transaction type is a reversal
+		allowNegative := sourceAccount.Type == accountTypeSystem || txType == txTypeReversal
+		if !allowNegative {
+			return nil, ErrNotEnough
+		}
 	}
 
 	if err := q.CreateLedgerEntry(ctx, created.ID, fromAccountID, -amount); err != nil {
@@ -305,6 +382,7 @@ func newResult(t storage.Transaction) *Result {
 		Amount:         t.Amount,
 		IdempotencyKey: t.IdempotencyKey,
 		Status:         t.Status,
+		Type:           t.Type,
 		CreatedAt:      t.CreatedAt,
 	}
 }

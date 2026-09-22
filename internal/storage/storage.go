@@ -30,7 +30,12 @@ type Transaction struct {
 	Amount                  int64
 	IdempotencyKey          string
 	Status                  string
-	CreatedAt               time.Time
+	Type                    string
+
+	// ReversalOf is set only for a reversal and indicates the transaction it reverses
+	ReversalOf *int64
+
+	CreatedAt time.Time
 }
 
 type Account struct {
