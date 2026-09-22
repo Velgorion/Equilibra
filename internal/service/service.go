@@ -375,7 +375,7 @@ func (s *Service) transfer(ctx context.Context, q storage.Querier, p transferPar
 }
 
 func newResult(t storage.Transaction) *Result {
-  return &Result{
+	return &Result{
 		TransactionID:  t.ID,
 		SourceID:       t.SourceID,
 		DestinationID:  t.DestinationID,

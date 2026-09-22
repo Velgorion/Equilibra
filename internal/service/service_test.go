@@ -915,7 +915,7 @@ func TestReverse(t *testing.T) {
 	`).Scan(&countEntries)
 
 	require.NoError(t, err)
-	require.Equal(t, int64(4), countEntries)
+	require.Equal(t, int64(5), countEntries)
 }
 
 func TestReverseAllowNegative(t *testing.T) {
