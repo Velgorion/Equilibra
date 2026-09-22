@@ -36,6 +36,18 @@ type Service struct {
 	storage Storage
 }
 
+// transferParams groups the arguments of the transfer core
+type transferParams struct {
+	From           int64
+	To             int64
+	Amount         int64
+	Type           string
+	IdempotencyKey string
+
+	// ReversalOf is set only for a reversal and indicates the transaction it reverses
+	ReversalOf *int64
+}
+
 type Result struct {
 	TransactionID           int64
 	SourceID, DestinationID int64
