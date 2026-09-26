@@ -3,14 +3,8 @@ package storage
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/jackc/pgx/v5"
-)
-
-const (
-	commitTimeout   = time.Second
-	rollbackTimeout = time.Minute
 )
 
 type Querier interface {

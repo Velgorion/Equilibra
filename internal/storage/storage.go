@@ -10,6 +10,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	commitTimeout   = time.Second
+	rollbackTimeout = time.Minute
+)
+
 var (
 	ErrNotFound     = errors.New("record not found")
 	ErrDuplicateKey = errors.New("duplicate idempotency key")
