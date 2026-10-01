@@ -21,7 +21,7 @@ var (
 	ErrSystemAccountNotAllowed    = errors.New("the transfer takes place only between users")
 	ErrInvalidDepositDestination  = errors.New("destination account in deposit operation must be user type")
 	ErrInvalidWithdrawSource      = errors.New("source account in withdraw operation must be user type")
-	ErrSystemAccountNotFound      = errors.New("the system account not found")
+	ErrSystemAccountNotFound      = errors.New("the system account not found. Must be one of: ATM, BANK")
 	ErrReverseIncompletedTx       = errors.New("it is not possible to reverse the incompleted transaction")
 	ErrReverseReversalTx          = errors.New("it is not possible to reverse the transaction of type 'reversal'")
 )
@@ -69,6 +69,10 @@ type Result struct {
 	Status                  string
 	Type                    string
 	CreatedAt               time.Time
+
+	// Replayed reports that this result came from an earlier request with the
+	// same idempotency key
+	Replayed bool
 }
 
 func New(s Storage) *Service {
@@ -275,6 +279,7 @@ func (s *Service) Reverse(ctx context.Context, transactionID int64,
 			return err
 		}
 
+		// Reversed transaction receives the 'reversed' status
 		if err := q.UpdateTransactionStatus(ctx, transactionID, txStatusReversed); err != nil {
 			return err
 		}
@@ -329,17 +334,21 @@ func (s *Service) transfer(ctx context.Context, q storage.Querier, p transferPar
 		IdempotencyKey: idempotencyKey, Type: txType, ReversalOf: reversalOf,
 	})
 	if err != nil {
+		// transaction with the same idempotency key already exists
 		if errors.Is(err, storage.ErrDuplicateKey) {
 			prevTransaction, err := q.GetTransaction(ctx, idempotencyKey)
 			if err != nil {
 				return nil, err
 			}
 
-			// return the result of the transaction with the same key if the arguments match
-			if compareTransactions(storage.Transaction{SourceID: fromAccountID, DestinationID: toAccountID, Amount: amount,
-				IdempotencyKey: idempotencyKey}, prevTransaction) {
+			// return the result of the transaction with the same idempotency key if the arguments match
+			if compareTransactions(storage.Transaction{SourceID: fromAccountID,
+				DestinationID: toAccountID, Amount: amount}, prevTransaction) {
 
-				return newResult(prevTransaction), nil
+				res := newResult(prevTransaction)
+				res.Replayed = true
+
+				return res, nil
 			}
 
 			// otherwise it's a error

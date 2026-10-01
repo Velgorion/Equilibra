@@ -621,7 +621,12 @@ func TestTransferIdempotency(t *testing.T) {
 			testRes, err := s.Transfer(t.Context(), tt.from, tt.to, tt.amount, tt.idempotencyKey)
 			require.ErrorIs(t, err, tt.wantErr)
 			if tt.wantErr == nil {
-				require.Equal(t, res, testRes)
+
+				require.True(t, testRes.Replayed)
+
+				want := *res
+				want.Replayed = true
+				require.Equal(t, &want, testRes)
 
 				againAliceBalance, err := balanceOf(t, s.storage, aliceID)
 				require.NoError(t, err)
