@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/Velgorion/equilibra/internal/config"
+	"github.com/Velgorion/equilibra/internal/handler"
 	"github.com/Velgorion/equilibra/internal/service"
 	"github.com/Velgorion/equilibra/internal/storage"
 
@@ -22,10 +25,14 @@ func main() {
 func run() error {
 	_ = godotenv.Load() // ignore the error in the sense that we won't have a .env file in prod, only while local development
 
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+
+	logger.Info("config loaded")
 
 	db, err := openDB(cfg)
 	if err != nil {
@@ -33,11 +40,13 @@ func run() error {
 	}
 	defer db.Close()
 
+	logger.Info("database connection pool established")
+
 	store := storage.New(db)
 	svc := service.New(store)
-	_ = svc
+	api := handler.New(svc, handler.BuildInfo{Env: cfg.Env, Version: cfg.Version}, logger)
 
-	return nil
+	return serve(cfg, logger, api.Routes())
 }
 
 func openDB(cfg config.Config) (*pgxpool.Pool, error) {
