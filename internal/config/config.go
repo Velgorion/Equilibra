@@ -18,6 +18,9 @@ type Database struct {
 
 type Config struct {
 	Database Database
+	Env      string `env:"ENV,required"`
+	Version  string `env:"VERSION,required"`
+	Port     int    `env:"PORT" envDefault:"8080"`
 }
 
 func Load() (Config, error) {
