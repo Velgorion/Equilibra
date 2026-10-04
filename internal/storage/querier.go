@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"math"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -11,6 +12,7 @@ type Querier interface {
 	GetAccount(ctx context.Context, id int64) (Account, error)
 	GetAccountForUpdate(ctx context.Context, id int64) (Account, error)
 	GetAccountBalance(ctx context.Context, id int64) (int64, error)
+	GetAccountHistory(ctx context.Context, accountID int64, limit, before int64) ([]LedgerEntry, error)
 	GetSystemAccountByCode(ctx context.Context, code string) (Account, error)
 	CreateTransaction(ctx context.Context, t Transaction) (Transaction, error)
 	GetTransaction(ctx context.Context, key string) (Transaction, error)
@@ -184,4 +186,43 @@ func (q *queries) CreateLedgerEntry(ctx context.Context, transactionID, accountI
 	`, transactionID, accountID, amount)
 
 	return err
+}
+
+func (q *queries) GetAccountHistory(ctx context.Context, accountID int64,
+	limit, before int64) ([]LedgerEntry, error) {
+
+	if before == 0 {
+		before = math.MaxInt64
+	}
+
+	rows, err := q.db.Query(ctx, `
+		SELECT l.id, l.amount, l.created_at,
+			t.id, t.source_id, t.destination_id, t.type, t.reversal_of
+		FROM ledger_entries l
+		JOIN transactions t
+		ON l.transaction_id = t.id
+		WHERE l.account_id = $1 AND l.id < $2
+		ORDER BY l.id DESC LIMIT $3
+	`, accountID, before, limit)
+
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	var entries []LedgerEntry
+
+	for rows.Next() {
+		var e LedgerEntry
+
+		if err := rows.Scan(&e.ID, &e.Amount, &e.CreatedAt, &e.TransactionID, &e.SourceID,
+			&e.DestinationID, &e.Type, &e.ReversalOf); err != nil {
+			return nil, err
+		}
+
+		entries = append(entries, e)
+	}
+
+	return entries, rows.Err()
 }

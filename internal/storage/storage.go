@@ -23,6 +23,7 @@ var (
 type dbtx interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (commandTag pgconn.CommandTag, err error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 type Storage struct {
@@ -50,6 +51,19 @@ type Account struct {
 	Type      string
 	Code      string
 	CreatedAt time.Time
+}
+
+type LedgerEntry struct {
+	ID            int64
+	TransactionID int64
+	Amount        int64
+	CreatedAt     time.Time
+	SourceID      int64
+	DestinationID int64
+	Type          string
+
+	// ReversalOf is set only for a reversal and indicates the transaction it reverses
+	ReversalOf *int64
 }
 
 func New(db *pgxpool.Pool) *Storage {
