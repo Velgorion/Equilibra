@@ -24,21 +24,32 @@ var (
 	ErrSystemAccountNotFound      = errors.New("the system account not found. Must be one of: ATM, BANK")
 	ErrReverseIncompletedTx       = errors.New("it is not possible to reverse the incompleted transaction")
 	ErrReverseReversalTx          = errors.New("it is not possible to reverse the transaction of type 'reversal'")
+
+	ErrAccountNotFound = errors.New("account not found")
 )
+
+// Transaction types are part of the public contract: they are returned to
+// clients as the "type" field
+const (
+	TxTypeWithdrawal = "withdrawal"
+	TxTypeDeposit    = "deposit"
+	TxTypeTransfer   = "transfer"
+	TxTypeReversal   = "reversal"
+)
+
+// MaxLimit is the largest page size the service will serve
+const MaxLimit = 999
 
 const (
 	accountTypeUser   = "user"
 	accountTypeSystem = "system"
 
-	txTypeWithdrawal = "withdrawal"
-	txTypeDeposit    = "deposit"
-	txTypeTransfer   = "transfer"
-	txTypeReversal   = "reversal"
-
 	txStatusPending   = "pending"
 	txStatusCompleted = "completed"
 	txStatusReversed  = "reversed"
 	txStatusFailed    = "failed"
+
+	defaultLimit = 10
 )
 
 type Storage interface {
@@ -70,9 +81,42 @@ type Result struct {
 	Type                    string
 	CreatedAt               time.Time
 
+	// ReversalOf is set only for a reversal and indicates the transaction it reverses
+	ReversalOf *int64
+
 	// Replayed reports that this result came from an earlier request with the
 	// same idempotency key
 	Replayed bool
+}
+
+// StatementEntry represents a record in the account transaction history.
+type StatementEntry struct {
+	EntryID       int64
+	TransactionID int64
+	Amount        int64
+
+	// CounterpartyID indicates the ID of an account with whom we interacted
+	// during the transaction
+	CounterpartyID int64
+
+	Type      string
+	CreatedAt time.Time
+
+	// ReversalOf is set only for a reversal and indicates the transaction it reverses
+	ReversalOf *int64
+}
+
+type Statement struct {
+	Entries    []StatementEntry
+	NextCursor int64 // NextCursor indicates the next StatementEntry ID
+}
+
+// AccountBalance is a structure returned in response
+// to user request to view the balance
+type AccountBalance struct {
+	AccountID int64
+	Currency  string
+	Balance   int64
 }
 
 func New(s Storage) *Service {
@@ -115,7 +159,7 @@ func (s *Service) Transfer(ctx context.Context, fromAccountID, toAccountID int64
 
 		result, err := s.transfer(ctx, q, transferParams{
 			From: fromAccountID, To: toAccountID, Amount: amount,
-			Type: txTypeTransfer, IdempotencyKey: idempotencyKey,
+			Type: TxTypeTransfer, IdempotencyKey: idempotencyKey,
 		})
 		if err != nil {
 			return err
@@ -172,7 +216,7 @@ func (s *Service) Deposit(ctx context.Context, destinationID int64,
 
 		result, err := s.transfer(ctx, q, transferParams{
 			From: sysAccount.ID, To: destinationID, Amount: amount,
-			Type: txTypeDeposit, IdempotencyKey: idempotencyKey,
+			Type: TxTypeDeposit, IdempotencyKey: idempotencyKey,
 		})
 		if err != nil {
 			return err
@@ -229,7 +273,7 @@ func (s *Service) Withdraw(ctx context.Context, sourceID int64,
 
 		result, err := s.transfer(ctx, q, transferParams{
 			From: sourceID, To: sysAccount.ID, Amount: amount,
-			Type: txTypeWithdrawal, IdempotencyKey: idempotencyKey,
+			Type: TxTypeWithdrawal, IdempotencyKey: idempotencyKey,
 		})
 		if err != nil {
 			return err
@@ -263,7 +307,7 @@ func (s *Service) Reverse(ctx context.Context, transactionID int64,
 			return ErrReverseIncompletedTx
 		}
 
-		if tx.Type == txTypeReversal {
+		if tx.Type == TxTypeReversal {
 			return ErrReverseReversalTx
 		}
 
@@ -271,7 +315,7 @@ func (s *Service) Reverse(ctx context.Context, transactionID int64,
 		// a reversal moves the money back, so the accounts swap roles
 		res, err = s.transfer(ctx, q, transferParams{
 			From: tx.DestinationID, To: tx.SourceID, Amount: tx.Amount,
-			Type: txTypeReversal, IdempotencyKey: idempotencyKey,
+			Type: TxTypeReversal, IdempotencyKey: idempotencyKey,
 			ReversalOf: &tx.ID,
 		})
 
@@ -291,6 +335,7 @@ func (s *Service) Reverse(ctx context.Context, transactionID int64,
 
 }
 
+// The core of the money transfer
 func (s *Service) transfer(ctx context.Context, q storage.Querier, p transferParams) (*Result, error) {
 	fromAccountID, toAccountID := p.From, p.To
 	amount, txType, idempotencyKey, reversalOf := p.Amount, p.Type, p.IdempotencyKey, p.ReversalOf
@@ -366,7 +411,7 @@ func (s *Service) transfer(ctx context.Context, q storage.Querier, p transferPar
 	if balanceFrom-amount < 0 {
 		// allow a negative balance if the source account type is system (another bank or "ATM")
 		// or if the transaction type is a reversal
-		allowNegative := sourceAccount.Type == accountTypeSystem || txType == txTypeReversal
+		allowNegative := sourceAccount.Type == accountTypeSystem || txType == TxTypeReversal
 		if !allowNegative {
 			return nil, ErrNotEnough
 		}
@@ -383,6 +428,98 @@ func (s *Service) transfer(ctx context.Context, q storage.Querier, p transferPar
 	return newResult(created), nil
 }
 
+func (s *Service) AccountBalance(ctx context.Context, accountID int64) (*AccountBalance, error) {
+	var account storage.Account
+	var balance int64
+
+	err := s.storage.WithTx(ctx, func(q storage.Querier) error {
+		var err error
+
+		account, err = q.GetAccount(ctx, accountID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return ErrAccountNotFound
+			}
+			return err
+		}
+
+		balance, err = q.GetAccountBalance(ctx, accountID)
+		return err
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &AccountBalance{
+		AccountID: account.ID,
+		Currency:  account.Currency,
+		Balance:   balance,
+	}, nil
+}
+
+func (s *Service) AccountTransactionsHistory(ctx context.Context, accountID int64,
+	limit, before int64) (Statement, error) {
+
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > MaxLimit {
+		limit = MaxLimit
+	}
+
+	var ledgerEntries []storage.LedgerEntry
+
+	err := s.storage.WithTx(ctx, func(q storage.Querier) error {
+		_, err := q.GetAccount(ctx, accountID)
+
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return ErrAccountNotFound
+			}
+			return err
+		}
+
+		ledgerEntries, err = q.GetAccountHistory(ctx, accountID, limit, before)
+		return err
+
+	})
+
+	if err != nil {
+		return Statement{}, err
+	}
+
+	var nextCursor int64
+	if len(ledgerEntries) > 0 {
+		nextCursor = ledgerEntries[len(ledgerEntries)-1].ID
+	}
+	// There is no more entries
+	if len(ledgerEntries) < int(limit) {
+		nextCursor = 0
+	}
+
+	var statementEntries []StatementEntry
+
+	for _, e := range ledgerEntries {
+		counterpartyID := e.DestinationID
+		if e.Amount > 0 {
+			counterpartyID = e.SourceID
+		}
+
+		statementEntries = append(statementEntries, StatementEntry{
+			EntryID:        e.ID,
+			TransactionID:  e.TransactionID,
+			Amount:         e.Amount,
+			CounterpartyID: counterpartyID,
+			Type:           e.Type,
+			CreatedAt:      e.CreatedAt,
+			ReversalOf:     e.ReversalOf,
+		})
+	}
+
+	return Statement{Entries: statementEntries, NextCursor: nextCursor}, nil
+}
+
 func newResult(t storage.Transaction) *Result {
 	return &Result{
 		TransactionID:  t.ID,
@@ -393,6 +530,7 @@ func newResult(t storage.Transaction) *Result {
 		Status:         t.Status,
 		Type:           t.Type,
 		CreatedAt:      t.CreatedAt,
+		ReversalOf:     t.ReversalOf,
 	}
 }
 
