@@ -13,9 +13,11 @@ import (
 type mockQuerier struct {
 	t *testing.T
 
-	getAccountFn              func(ctx context.Context, id int64) (storage.Account, error)
-	getAccountForUpdateFn     func(ctx context.Context, id int64) (storage.Account, error)
-	getAccountBalanceFn       func(ctx context.Context, id int64) (int64, error)
+	getAccountFn          func(ctx context.Context, id int64) (storage.Account, error)
+	getAccountForUpdateFn func(ctx context.Context, id int64) (storage.Account, error)
+	getAccountBalanceFn   func(ctx context.Context, id int64) (int64, error)
+	getAccountHistoryFn   func(ctx context.Context, accountID int64,
+		limit, before int64) ([]storage.LedgerEntry, error)
 	getSystemAccountByCodeFn  func(ctx context.Context, code string) (storage.Account, error)
 	createTransactionFn       func(ctx context.Context, t storage.Transaction) (storage.Transaction, error)
 	getTransactionFn          func(ctx context.Context, key string) (storage.Transaction, error)
@@ -67,6 +69,16 @@ func (m *mockQuerier) GetAccountBalance(ctx context.Context, id int64) (int64, e
 	}
 
 	return m.getAccountBalanceFn(ctx, id)
+}
+
+func (m *mockQuerier) GetAccountHistory(ctx context.Context, accountID int64,
+	limit, before int64) ([]storage.LedgerEntry, error) {
+
+	if m.getAccountHistoryFn == nil {
+		m.t.Fatalf("unexpected call: GetAccountHistory(%d)", accountID)
+	}
+
+	return m.getAccountHistoryFn(ctx, accountID, limit, before)
 }
 
 func (m *mockQuerier) GetSystemAccountByCode(ctx context.Context, code string) (storage.Account, error) {
@@ -293,9 +305,9 @@ func TestUnitReverseErrors(t *testing.T) {
 			q.getTransactionByIDFn = func(ctx context.Context, transactionID int64) (storage.Transaction, error) {
 				switch transactionID {
 				case reversedID:
-					return storage.Transaction{Status: txStatusReversed, Type: txTypeTransfer}, nil
+					return storage.Transaction{Status: txStatusReversed, Type: TxTypeTransfer}, nil
 				case reversalID:
-					return storage.Transaction{Status: txStatusCompleted, Type: txTypeReversal}, nil
+					return storage.Transaction{Status: txStatusCompleted, Type: TxTypeReversal}, nil
 				default:
 					return storage.Transaction{}, ErrTransactionNotFound
 				}
@@ -330,7 +342,7 @@ func TestUnitReverse(t *testing.T) {
 			Amount:         100,
 			IdempotencyKey: "key",
 			Status:         txStatusCompleted,
-			Type:           txTypeTransfer,
+			Type:           TxTypeTransfer,
 		}, nil
 	}
 
@@ -353,7 +365,7 @@ func TestUnitReverse(t *testing.T) {
 	require.True(t, st.committed)
 
 	require.Equal(t, reversalTransactionID, res.TransactionID)
-	require.Equal(t, txTypeReversal, res.Type)
+	require.Equal(t, TxTypeReversal, res.Type)
 
 	// During the reversal operation the destination account must become
 	// the source account, and vice versa.
@@ -369,4 +381,69 @@ func TestUnitReverse(t *testing.T) {
 	require.Equal(t, []statusUpdate{
 		{TransactionID: originalTransactionID, Status: txStatusReversed},
 	}, q.statusUpdates)
+}
+
+func TestUnitAccountBalance(t *testing.T) {
+	s, q, st := newMockService(t)
+
+	q.getAccountFn = func(ctx context.Context, id int64) (storage.Account, error) {
+		if id > 10 {
+			return storage.Account{}, ErrAccountNotFound
+		}
+		return storage.Account{}, nil
+	}
+
+	accBalance, err := s.AccountBalance(t.Context(), 11)
+	require.ErrorIs(t, err, ErrAccountNotFound)
+	require.Nil(t, accBalance)
+	require.False(t, st.committed)
+	require.Empty(t, q.ledgerEntries)
+}
+
+func TestUnitAccountTransactionsHistoryLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		limit     int64
+		wantLimit int64
+	}{
+		{name: "zero limit", limit: 0, wantLimit: defaultLimit},
+		{name: "negative limit", limit: -5, wantLimit: defaultLimit},
+		{name: "above the maximum limit", limit: MaxLimit + 1, wantLimit: MaxLimit},
+		{name: "valid limit", limit: 50, wantLimit: 50},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, q, _ := newMockService(t)
+
+			q.getAccountFn = func(ctx context.Context, id int64) (storage.Account, error) {
+				return account(id, "RUB", accountTypeUser), nil
+			}
+
+			var gotLimit, gotBefore int64
+			q.getAccountHistoryFn = func(ctx context.Context, accountID int64,
+				limit, before int64) ([]storage.LedgerEntry, error) {
+
+				gotLimit, gotBefore = limit, before
+				return nil, nil
+			}
+
+			_, err := s.AccountTransactionsHistory(t.Context(), 10, tt.limit, 42)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantLimit, gotLimit)
+
+			require.Equal(t, int64(42), gotBefore)
+		})
+	}
+}
+
+func TestUnitAccountTransactionsHistoryNotFound(t *testing.T) {
+	s, q, _ := newMockService(t)
+
+	q.getAccountFn = func(ctx context.Context, id int64) (storage.Account, error) {
+		return storage.Account{}, storage.ErrNotFound
+	}
+
+	_, err := s.AccountTransactionsHistory(t.Context(), 10, 10, 0)
+	require.ErrorIs(t, err, ErrAccountNotFound)
 }

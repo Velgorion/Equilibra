@@ -168,7 +168,7 @@ type testTransactionParams struct {
 // code under test.
 func createTestTransaction(ctx context.Context, pool *pgxpool.Pool, p testTransactionParams) (int64, error) {
 	if p.Type == "" {
-		p.Type = txTypeTransfer
+		p.Type = TxTypeTransfer
 	}
 
 	var id int64
@@ -402,7 +402,7 @@ func TestDeposit(t *testing.T) {
 	res, err := s.Deposit(t.Context(), aliceID, 100, "BANK", "key")
 	require.NoError(t, err)
 
-	require.Equal(t, txTypeDeposit, res.Type)
+	require.Equal(t, TxTypeDeposit, res.Type)
 	require.Equal(t, aliceID, res.DestinationID)
 
 	balance, err := balanceOf(t, s.storage, aliceID)
@@ -419,7 +419,7 @@ func TestDeposit(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "BANK_IN_RUB", code)
-	require.Equal(t, txTypeDeposit, typ)
+	require.Equal(t, TxTypeDeposit, typ)
 
 	sumOfEntries, err := sumLedgerEntries(t.Context(), pgPool)
 	require.NoError(t, err)
@@ -440,7 +440,7 @@ func TestWithdraw(t *testing.T) {
 	res, err := s.Withdraw(t.Context(), aliceID, 200, "ATM", "withdraw-key")
 	require.NoError(t, err)
 
-	require.Equal(t, txTypeWithdrawal, res.Type)
+	require.Equal(t, TxTypeWithdrawal, res.Type)
 	require.Equal(t, aliceID, res.SourceID)
 
 	balance, err := balanceOf(t, s.storage, aliceID)
@@ -458,7 +458,7 @@ func TestWithdraw(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "ATM_OUT_RUB", code)
-	require.Equal(t, txTypeWithdrawal, typ)
+	require.Equal(t, TxTypeWithdrawal, typ)
 
 	sumOfEntries, err := sumLedgerEntries(t.Context(), pgPool)
 	require.NoError(t, err)
@@ -854,7 +854,7 @@ func TestReverse(t *testing.T) {
 	res, err := s.Reverse(t.Context(), transactionID, "key")
 	require.NoError(t, err)
 
-	require.Equal(t, txTypeReversal, res.Type)
+	require.Equal(t, TxTypeReversal, res.Type)
 	require.Equal(t, txStatusCompleted, res.Status)
 
 	// In total we should have 4 ledger entries
@@ -902,7 +902,7 @@ func TestReverse(t *testing.T) {
 		&reversalTx.Type, &reversalTx.ReversalOf)
 
 	require.NoError(t, err)
-	require.Equal(t, txTypeReversal, reversalTx.Type)
+	require.Equal(t, TxTypeReversal, reversalTx.Type)
 
 	// reversalTx.ReversalOf must contain the ID of the transaction being reversed
 	require.Equal(t, reversedTx.ID, *reversalTx.ReversalOf)
@@ -956,7 +956,7 @@ func TestReverseAllowNegative(t *testing.T) {
 	// which would lead us to negative balance on Alice's account
 	res, err := s.Reverse(t.Context(), transactionID_1, "key")
 	require.NoError(t, err)
-	require.Equal(t, txTypeReversal, res.Type)
+	require.Equal(t, TxTypeReversal, res.Type)
 	require.Equal(t, txStatusCompleted, res.Status)
 
 	negativeAliceBalance, err := balanceOf(t, s.storage, aliceID)
@@ -965,4 +965,77 @@ func TestReverseAllowNegative(t *testing.T) {
 	// But the 'allowNegative' condition in the transfer permits a negative balance
 	// due to a reversing transaction
 	require.Equal(t, int64(-100), negativeAliceBalance)
+}
+
+func TestAccountBalance(t *testing.T) {
+	pgPool := setupTest(t)
+	s := newTestService(pgPool)
+
+	aliceID, err := createTestAccount(t.Context(), pgPool, "Alice", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, aliceID)
+
+	b, err := s.AccountBalance(t.Context(), aliceID)
+	require.NoError(t, err)
+	require.Equal(t, AccountBalance{AccountID: aliceID,
+		Currency: "RUB", Balance: int64(0)}, *b)
+
+	fundAccount(t, s, aliceID, 999, "key")
+
+	b, err = s.AccountBalance(t.Context(), aliceID)
+	require.NoError(t, err)
+	require.Equal(t, AccountBalance{AccountID: aliceID,
+		Currency: "RUB", Balance: int64(999)}, *b)
+}
+
+func TestAccountTransactionsHistory(t *testing.T) {
+	pgPool := setupTest(t)
+	s := newTestService(pgPool)
+
+	aliceID, err := createTestAccount(t.Context(), pgPool, "Alice", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, aliceID)
+
+	bobID, err := createTestAccount(t.Context(), pgPool, "Bob", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, bobID)
+
+	// Alice's history, oldest first: +1000 deposit, -100 to Bob, +30 from Bob
+	fundAccount(t, s, aliceID, 1000, "deposit-key")
+
+	toBob, err := s.Transfer(t.Context(), aliceID, bobID, 100, "transfer-key-1")
+	require.NoError(t, err)
+
+	fromBob, err := s.Transfer(t.Context(), bobID, aliceID, 30, "transfer-key-2")
+	require.NoError(t, err)
+
+	// The first page is full, so it has to point at the next one
+	page, err := s.AccountTransactionsHistory(t.Context(), aliceID, 2, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 2)
+
+	// counterparty is the other side of the transfer
+	// regardless of the direction of the money
+	require.Equal(t, fromBob.TransactionID, page.Entries[0].TransactionID)
+	require.Equal(t, int64(30), page.Entries[0].Amount)
+	require.Equal(t, bobID, page.Entries[0].CounterpartyID)
+
+	require.Equal(t, toBob.TransactionID, page.Entries[1].TransactionID)
+	require.Equal(t, int64(-100), page.Entries[1].Amount)
+	require.Equal(t, bobID, page.Entries[1].CounterpartyID)
+
+	require.Equal(t, page.Entries[1].EntryID, page.NextCursor)
+
+	// The second page holds the only remaining entry and is the last one
+	page, err = s.AccountTransactionsHistory(t.Context(), aliceID, 2, page.NextCursor)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+
+	require.Equal(t, TxTypeDeposit, page.Entries[0].Type)
+	require.Equal(t, int64(1000), page.Entries[0].Amount)
+	require.Zero(t, page.NextCursor)
+
+	// An unknown account is an error, not an empty history
+	_, err = s.AccountTransactionsHistory(t.Context(), 999999, 2, 0)
+	require.ErrorIs(t, err, ErrAccountNotFound)
 }
