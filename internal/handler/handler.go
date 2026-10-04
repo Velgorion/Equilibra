@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -24,6 +25,11 @@ type Service interface {
 
 	Reverse(ctx context.Context, transactionID int64,
 		idempotencyKey string) (*service.Result, error)
+
+	AccountBalance(ctx context.Context, accountID int64) (*service.AccountBalance, error)
+
+	AccountTransactionsHistory(ctx context.Context, accountID int64,
+		limit, before int64) (service.Statement, error)
 }
 
 // operationTimeout bounds a single money operation
@@ -57,6 +63,8 @@ func (a *API) Routes() http.Handler {
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/healthcheck", a.healthcheckHandler)
+		r.Get("/accounts/{id}/balance", a.accountBalanceHandler)
+		r.Get("/accounts/{id}/transactions", a.accountHistoryHandler)
 		r.Post("/transfers", a.transferHandler)
 		r.Post("/deposits", a.depositHandler)
 		r.Post("/withdrawals", a.withdrawHandler)
@@ -202,4 +210,67 @@ func (a *API) reverseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeTransaction(w, r, res)
+}
+
+func (a *API) accountBalanceHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		a.notFoundResponse(w, r, errors.New("invalid id parameter"))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), operationTimeout)
+	defer cancel()
+
+	b, err := a.service.AccountBalance(ctx, id)
+	if err != nil {
+		a.handleError(w, r, err)
+		return
+	}
+
+	err = a.writeJSON(w, http.StatusOK, envelope{"account": newBalanceResponse(b)}, nil)
+	if err != nil {
+		a.serverErrorResponse(w, r, err)
+		return
+	}
+}
+
+func (a *API) accountHistoryHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		a.notFoundResponse(w, r, errors.New("invalid id parameter"))
+		return
+	}
+
+	v := newValidator()
+
+	qs := r.URL.Query()
+
+	limit := a.readInt64(qs, "limit", 10, v)
+	before := a.readInt64(qs, "before", 0, v)
+
+	v.Check(limit > 0, "limit", "must be greater than zero")
+	v.Check(limit <= service.MaxLimit, "limit",
+		fmt.Sprintf("must not exceed %d", service.MaxLimit))
+	v.Check(before >= 0, "before", "must not be negative")
+
+	if !v.Valid() {
+		a.failedValidationResponse(w, r, v.Errors)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), operationTimeout)
+	defer cancel()
+
+	history, err := a.service.AccountTransactionsHistory(ctx, id, limit, before)
+	if err != nil {
+		a.handleError(w, r, err)
+		return
+	}
+
+	err = a.writeJSON(w, http.StatusOK, envelope{"history": newAccountHistoryResponse(&history)}, nil)
+	if err != nil {
+		a.serverErrorResponse(w, r, err)
+		return
+	}
 }

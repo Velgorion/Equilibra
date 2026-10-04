@@ -32,28 +32,29 @@ func (a *API) handleError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, svc.ErrInvalidAmount),
 		errors.Is(err, svc.ErrSameAccount):
-		a.badRequestResponse(w, r, err)
+		a.badRequestResponse(w, r, err) // 400
 
 	case errors.Is(err, svc.ErrSourceAccountNotFound),
 		errors.Is(err, svc.ErrDestinationAccountNotFound),
 		errors.Is(err, svc.ErrSystemAccountNotFound),
-		errors.Is(err, svc.ErrTransactionNotFound):
-		a.notFoundResponse(w, r, err)
+		errors.Is(err, svc.ErrTransactionNotFound),
+		errors.Is(err, svc.ErrAccountNotFound):
+		a.notFoundResponse(w, r, err) // 404
 
 	case errors.Is(err, svc.ErrNotEnough),
 		errors.Is(err, svc.ErrCurrencyMismatch),
 		errors.Is(err, svc.ErrSystemAccountNotAllowed),
 		errors.Is(err, svc.ErrInvalidWithdrawSource),
 		errors.Is(err, svc.ErrInvalidDepositDestination):
-		a.unprocessableEntityResponse(w, r, err)
+		a.unprocessableEntityResponse(w, r, err) // 422
 
 	case errors.Is(err, svc.ErrTransactionsMismatch),
 		errors.Is(err, svc.ErrReverseIncompletedTx),
 		errors.Is(err, svc.ErrReverseReversalTx):
-		a.conflictResponse(w, r, err)
+		a.conflictResponse(w, r, err) // 409
 
 	default:
-		a.serverErrorResponse(w, r, err)
+		a.serverErrorResponse(w, r, err) // 500
 	}
 }
 
