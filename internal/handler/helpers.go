@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/Velgorion/equilibra/internal/service"
@@ -101,6 +103,23 @@ func (a *API) writeTransaction(w http.ResponseWriter, r *http.Request, res *serv
 		a.serverErrorResponse(w, r, err)
 		return
 	}
+}
+
+func (a *API) readInt64(qs url.Values, key string, defaultValue int64, v *validator) int64 {
+
+	val := qs.Get(key)
+
+	if val == "" {
+		return defaultValue
+	}
+
+	i, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		v.AddError(key, "must be an integer value")
+		return defaultValue
+	}
+
+	return i
 }
 
 func idempotencyKey(r *http.Request) (string, error) {
