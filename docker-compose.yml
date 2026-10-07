@@ -1,14 +1,46 @@
 services:
+
+  api:
+    build: .
+
+    environment:
+      DB_DSN: "postgres://user:pa55word@db:5432/equilibra?sslmode=disable"
+      ENV: "development"
+      VERSION: "v1"
+
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   db:
     image: postgres:15-alpine
+
     environment:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: pa55word
       POSTGRES_DB: equilibra
+
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U user -d equilibra" ]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:4
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./migrations/:/migrations
+    command: [ "-path", "/migrations/", "-database", "postgres://user:pa55word@db:5432/equilibra?sslmode=disable", "up" ]
 
 volumes:
   pgdata:

@@ -17,3 +17,7 @@ migrate-up:
 
 migrate-down:
 	migrate -database $$DB_DSN -path migrations down
+
+compose-fresh:
+	docker compose -p equilibra-clean down -v
+	docker compose -p equilibra-clean up --build
