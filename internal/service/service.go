@@ -435,7 +435,7 @@ func (s *Service) transfer(ctx context.Context, q storage.Querier, p transferPar
 		Currency:        sourceAccount.Currency,
 		CounterpartyID:  toAccountID,
 		ReversalOf:      created.ReversalOf,
-		OccuredAt:       created.CreatedAt,
+		OccurredAt:      created.CreatedAt,
 	}
 
 	credit := events.EntryPosted{
@@ -446,7 +446,7 @@ func (s *Service) transfer(ctx context.Context, q storage.Querier, p transferPar
 		Currency:        destinationAccount.Currency,
 		CounterpartyID:  fromAccountID,
 		ReversalOf:      created.ReversalOf,
-		OccuredAt:       created.CreatedAt,
+		OccurredAt:      created.CreatedAt,
 	}
 
 	err = q.CreateOutboxEvent(ctx, events.EntryTypePosted, credit.Key(), credit)

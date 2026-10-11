@@ -18,7 +18,7 @@ type EntryPosted struct {
 	Currency        string    `json:"currency"`
 	CounterpartyID  int64     `json:"counterparty_id"`
 	ReversalOf      *int64    `json:"reversal_of,omitempty"`
-	OccuredAt       time.Time `json:"occured_at"`
+	OccurredAt      time.Time `json:"occurred_at"`
 }
 
 // Key returns the Kafka partition key: all events of one account
