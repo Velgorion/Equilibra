@@ -2,10 +2,13 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type Querier interface {
@@ -19,6 +22,13 @@ type Querier interface {
 	GetTransactionByID(ctx context.Context, transactionID int64) (Transaction, error)
 	CreateLedgerEntry(ctx context.Context, transactionID, accountID, amount int64) error
 	UpdateTransactionStatus(ctx context.Context, transactionID int64, status string) error
+	CreateOutboxEvent(ctx context.Context, eventType, partitionKey string, payload any) error
+}
+
+type dbtx interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (commandTag pgconn.CommandTag, err error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 type queries struct {
@@ -166,13 +176,13 @@ func (q *queries) GetTransactionByID(ctx context.Context, transactionID int64) (
 }
 
 func (q *queries) UpdateTransactionStatus(ctx context.Context, transactionID int64, status string) error {
-	res, err := q.db.Exec(ctx, `
+	tag, err := q.db.Exec(ctx, `
 		UPDATE transactions
 		SET status = $1
 		WHERE id = $2 AND status = 'completed';
 	`, status, transactionID)
 
-	if res.RowsAffected() == 0 {
+	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
 
@@ -225,4 +235,19 @@ func (q *queries) GetAccountHistory(ctx context.Context, accountID int64,
 	}
 
 	return entries, rows.Err()
+}
+
+func (q *queries) CreateOutboxEvent(ctx context.Context, eventType, partitionKey string, payload any) error {
+	js, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal event payload: %w", err)
+	}
+
+	_, err = q.db.Exec(ctx, `
+		INSERT INTO outbox
+		(event_type, partition_key, payload)
+		VALUES ($1, $2, $3);
+	`, eventType, partitionKey, js)
+
+	return err
 }

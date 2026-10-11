@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Velgorion/equilibra/internal/events"
 	"github.com/Velgorion/equilibra/internal/storage"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -91,7 +92,7 @@ func setupTest(t *testing.T) *pgxpool.Pool {
 
 	// Clean tables before every test
 	_, err := testPool.Exec(t.Context(), `
-		TRUNCATE ledger_entries, transactions RESTART IDENTITY CASCADE;
+		TRUNCATE ledger_entries, transactions, outbox RESTART IDENTITY CASCADE;
 	`)
 	require.NoError(t, err)
 
@@ -236,6 +237,47 @@ func sumLedgerEntries(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	`).Scan(&sum)
 
 	return sum, err
+}
+
+type OutboxEvent struct {
+	ID           int64
+	EventID      string
+	EventType    string
+	PartitionKey string
+	Payload      events.EntryPosted
+	CreatedAt    time.Time
+	PublishedAt  *time.Time
+}
+
+func getOutboxEvents(ctx context.Context, pool *pgxpool.Pool) ([]OutboxEvent, error) {
+
+	var events []OutboxEvent
+
+	rows, err := pool.Query(ctx, `
+		SELECT event_type, partition_key,
+				payload, published_at
+		FROM outbox
+		ORDER BY id;
+	`)
+
+	if err != nil {
+		return events, err
+	}
+
+	defer rows.Close()
+
+	for rows.Next() {
+		var e OutboxEvent
+
+		if err := rows.Scan(&e.EventType, &e.PartitionKey,
+			&e.Payload, &e.PublishedAt); err != nil {
+			return events, err
+		}
+
+		events = append(events, e)
+	}
+
+	return events, rows.Err()
 }
 
 func TestTransfer(t *testing.T) {
@@ -1038,4 +1080,118 @@ func TestAccountTransactionsHistory(t *testing.T) {
 	// An unknown account is an error, not an empty history
 	_, err = s.AccountTransactionsHistory(t.Context(), 999999, 2, 0)
 	require.ErrorIs(t, err, ErrAccountNotFound)
+}
+
+func TestCreateOutboxEvent(t *testing.T) {
+
+	const (
+		idemKey string = "key"
+	)
+
+	pgPool := setupTest(t)
+	s := newTestService(pgPool)
+
+	aliceID, err := createTestAccount(t.Context(), pgPool, "Alice", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, aliceID)
+
+	bobID, err := createTestAccount(t.Context(), pgPool, "Bob", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, bobID)
+
+	fundAccount(t, s, aliceID, 1000, "deposit-key")
+
+	// Clean the outbox table from deposit transaction, that was caused by fundAccount()
+	_, err = pgPool.Exec(t.Context(),
+		`TRUNCATE outbox RESTART IDENTITY CASCADE;`)
+	require.NoError(t, err)
+
+	res, err := s.Transfer(t.Context(), aliceID, bobID, 100, idemKey)
+	require.NoError(t, err)
+
+	outbox, err := getOutboxEvents(t.Context(), pgPool)
+	require.NoError(t, err)
+
+	// Two events: for source and destination account
+	require.Equal(t, 2, len(outbox))
+	require.Equal(t, int64(0), outbox[0].Payload.Amount+outbox[1].Payload.Amount)
+
+	credit, debit := outbox[0], outbox[1]
+
+	require.Equal(t, events.EntryTypePosted, credit.EventType)
+	require.Equal(t, bobID, credit.Payload.AccountID)
+	require.Equal(t, int64(100), credit.Payload.Amount)
+	require.Equal(t, aliceID, credit.Payload.CounterpartyID)
+	require.Equal(t, res.TransactionID, credit.Payload.TransactionID)
+
+	require.Equal(t, events.EntryTypePosted, debit.EventType)
+	require.Equal(t, aliceID, debit.Payload.AccountID)
+	require.Equal(t, int64(-100), debit.Payload.Amount)
+	require.Equal(t, bobID, debit.Payload.CounterpartyID)
+	require.Equal(t, res.TransactionID, debit.Payload.TransactionID)
+
+	// PartitionKey is a accountID. All events of one account go to the same partition
+	// and keep their order
+	require.Equal(t, credit.PartitionKey, credit.Payload.Key())
+	require.Equal(t, debit.PartitionKey, debit.Payload.Key())
+
+	// Only Relay when publish events sets this field
+	require.Nil(t, credit.PublishedAt)
+	require.Nil(t, debit.PublishedAt)
+
+	// Use the same idempotency key
+	_, err = s.Transfer(t.Context(), aliceID, bobID, 100, idemKey)
+	require.NoError(t, err)
+
+	outbox, err = getOutboxEvents(t.Context(), pgPool)
+	require.NoError(t, err)
+
+	// The previous transaction did not create new events in the outbox table,
+	// so there are still 2 events
+	require.Equal(t, 2, len(outbox))
+
+	// ErrNotEnough
+	_, err = s.Transfer(t.Context(), aliceID, bobID, 99999999, "key_2")
+	require.ErrorIs(t, err, ErrNotEnough)
+
+	outbox, err = getOutboxEvents(t.Context(), pgPool)
+	require.NoError(t, err)
+
+	// The transaction with ErrNotEnough error did not create new events in the outbox table
+	require.Equal(t, 2, len(outbox))
+}
+
+func TestOutboxReversalEvents(t *testing.T) {
+
+	pgPool := setupTest(t)
+	s := newTestService(pgPool)
+
+	aliceID, err := createTestAccount(t.Context(), pgPool, "Alice", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, aliceID)
+
+	bobID, err := createTestAccount(t.Context(), pgPool, "Bob", "RUB")
+	require.NoError(t, err)
+	require.NotZero(t, bobID)
+
+	fundAccount(t, s, aliceID, 1000, "deposit-key")
+
+	res, err := s.Transfer(t.Context(), aliceID, bobID, 100, "transfer_key")
+	require.NoError(t, err)
+
+	// Clean the outbox table
+	_, err = pgPool.Exec(t.Context(),
+		`TRUNCATE outbox RESTART IDENTITY CASCADE;`)
+	require.NoError(t, err)
+
+	_, err = s.Reverse(t.Context(), res.TransactionID, "reverse_key")
+	require.NoError(t, err)
+
+	events, err := getOutboxEvents(t.Context(), pgPool)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(events))
+
+	// Payload.ReversalOf fields are setted with the value of res.TransactionID
+	require.Equal(t, *events[0].Payload.ReversalOf, res.TransactionID)
+	require.Equal(t, *events[1].Payload.ReversalOf, res.TransactionID)
 }

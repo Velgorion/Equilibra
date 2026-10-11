@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Velgorion/equilibra/internal/events"
 	"github.com/Velgorion/equilibra/internal/storage"
 )
 
@@ -422,6 +423,39 @@ func (s *Service) transfer(ctx context.Context, q storage.Querier, p transferPar
 	}
 
 	if err := q.CreateLedgerEntry(ctx, created.ID, toAccountID, amount); err != nil {
+		return nil, err
+	}
+
+	// Create events for outbox table in the same db transaction
+	debit := events.EntryPosted{
+		AccountID:       fromAccountID,
+		TransactionID:   created.ID,
+		TransactionType: created.Type,
+		Amount:          -amount,
+		Currency:        sourceAccount.Currency,
+		CounterpartyID:  toAccountID,
+		ReversalOf:      created.ReversalOf,
+		OccuredAt:       created.CreatedAt,
+	}
+
+	credit := events.EntryPosted{
+		AccountID:       toAccountID,
+		TransactionID:   created.ID,
+		TransactionType: created.Type,
+		Amount:          amount,
+		Currency:        destinationAccount.Currency,
+		CounterpartyID:  fromAccountID,
+		ReversalOf:      created.ReversalOf,
+		OccuredAt:       created.CreatedAt,
+	}
+
+	err = q.CreateOutboxEvent(ctx, events.EntryTypePosted, credit.Key(), credit)
+	if err != nil {
+		return nil, err
+	}
+
+	err = q.CreateOutboxEvent(ctx, events.EntryTypePosted, debit.Key(), debit)
+	if err != nil {
 		return nil, err
 	}
 

@@ -24,6 +24,7 @@ type mockQuerier struct {
 	getTransactionByIDFn      func(ctx context.Context, transactionID int64) (storage.Transaction, error)
 	createLedgerEntryFn       func(ctx context.Context, transactionID, accountID, amount int64) error
 	updateTransactionStatusFn func(ctx context.Context, transactionID int64, status string) error
+	createOutboxEventFn       func(ctx context.Context, eventType, partitionKey string, payload any) error
 
 	// ledgerEntries records every entry written, so a test can assert that a
 	// rejected operation moved no money at all.
@@ -45,6 +46,13 @@ type ledgerEntry struct {
 type statusUpdate struct {
 	TransactionID int64
 	Status        string
+}
+
+func (m *mockQuerier) CreateOutboxEvent(ctx context.Context, eventType, partitionKey string, payload any) error {
+	if m.createOutboxEventFn == nil {
+		m.t.Fatal("unexpected call: CreateOutboxEvent()")
+	}
+	return m.createOutboxEventFn(ctx, eventType, partitionKey, payload)
 }
 
 func (m *mockQuerier) GetAccount(ctx context.Context, id int64) (storage.Account, error) {
@@ -257,6 +265,10 @@ func TestUnitDeposit(t *testing.T) {
 		return 1000, nil
 	}
 
+	q.createOutboxEventFn = func(ctx context.Context, eventType, partitionKey string, payload any) error {
+		return nil
+	}
+
 	res, err := s.Deposit(t.Context(), userAccountID, 100, "BANK", "key")
 
 	require.NoError(t, err)
@@ -358,6 +370,10 @@ func TestUnitReverse(t *testing.T) {
 
 	q.getAccountBalanceFn = func(ctx context.Context, id int64) (int64, error) {
 		return 1000, nil
+	}
+
+	q.createOutboxEventFn = func(ctx context.Context, eventType, partitionKey string, payload any) error {
+		return nil
 	}
 
 	res, err := s.Reverse(t.Context(), originalTransactionID, "key")

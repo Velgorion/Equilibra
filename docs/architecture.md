@@ -73,12 +73,18 @@ flowchart LR
 - снаружи REST/JSON
 - внутри синхронно gRPC: gateway -> ledger, gateway -> interbank, interbank -> ledger
 - interbank -> fakebank по HTTP, как с настоящим внешним банком
-- асинхронно через Kafka: ledger публикует `transaction.completed` и `transaction.reversed`,
-  их читают notification, search и analytics. Ledger про них не знает и от них не зависит.
+- асинхронно через Kafka: ledger публикует события, их читают notification, search
+  и analytics. Ledger про них не знает и от них не зависит.
 
-Событие: `event_id`, `type`, `transaction_id`, `transaction_type`, `source_id`,
-`destination_id`, `amount`, `currency`, `reversal_of`, `occurred_at`.
-Ключ партиции - id счёта, чтобы события одного счёта шли по порядку.
+На каждую проводку - одно событие `entry.posted`. Перевод даёт два события: списание
+со счёта отправителя и зачисление на счёт получателя. События пишутся и для системных
+счетов, потребители сами отбрасывают то, что им не нужно.
+
+Поля: `event_id`, `account_id`, `transaction_id`, `transaction_type`, `amount`
+(со знаком: плюс - зачисление, минус - списание), `counterparty_id`, `currency`,
+`reversal_of` (только у сторно), `occurred_at`.
+
+Ключ партиции - `account_id`, поэтому все события одного счёта идут по порядку.
 
 ## Outbox
 
