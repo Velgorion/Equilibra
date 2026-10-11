@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,12 +18,6 @@ var (
 	ErrNotFound     = errors.New("record not found")
 	ErrDuplicateKey = errors.New("duplicate idempotency key")
 )
-
-type dbtx interface {
-	Exec(ctx context.Context, sql string, arguments ...any) (commandTag pgconn.CommandTag, err error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
 
 type Storage struct {
 	db *pgxpool.Pool
