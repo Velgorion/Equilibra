@@ -25,6 +25,9 @@ type mockQuerier struct {
 	createLedgerEntryFn       func(ctx context.Context, transactionID, accountID, amount int64) error
 	updateTransactionStatusFn func(ctx context.Context, transactionID int64, status string) error
 	createOutboxEventFn       func(ctx context.Context, eventType, partitionKey string, payload any) error
+	tryLockOutboxFn           func(ctx context.Context) (bool, error)
+	getUnpublishedOutboxFn    func(ctx context.Context, limit int) ([]storage.OutboxEvent, error)
+	markOutboxPublishedFn     func(ctx context.Context, ids []int64) error
 
 	// ledgerEntries records every entry written, so a test can assert that a
 	// rejected operation moved no money at all.
@@ -53,6 +56,27 @@ func (m *mockQuerier) CreateOutboxEvent(ctx context.Context, eventType, partitio
 		m.t.Fatal("unexpected call: CreateOutboxEvent()")
 	}
 	return m.createOutboxEventFn(ctx, eventType, partitionKey, payload)
+}
+
+func (m *mockQuerier) TryLockOutbox(ctx context.Context) (bool, error) {
+	if m.tryLockOutboxFn == nil {
+		m.t.Fatal("unexpected call: TryLockOutbox()")
+	}
+	return m.tryLockOutboxFn(ctx)
+}
+
+func (m *mockQuerier) GetUnpublishedOutboxEvents(ctx context.Context, limit int) ([]storage.OutboxEvent, error) {
+	if m.getUnpublishedOutboxFn == nil {
+		m.t.Fatalf("unexpected call: GetUnpublishedOutboxEvents(%d)", limit)
+	}
+	return m.getUnpublishedOutboxFn(ctx, limit)
+}
+
+func (m *mockQuerier) MarkOutboxEventsPublished(ctx context.Context, ids []int64) error {
+	if m.markOutboxPublishedFn == nil {
+		m.t.Fatalf("unexpected call: MarkOutboxEventsPublished(%v)", ids)
+	}
+	return m.markOutboxPublishedFn(ctx, ids)
 }
 
 func (m *mockQuerier) GetAccount(ctx context.Context, id int64) (storage.Account, error) {

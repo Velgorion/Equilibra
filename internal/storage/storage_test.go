@@ -86,7 +86,7 @@ func setupTest(t *testing.T) *pgxpool.Pool {
 
 	// Clean tables before every test
 	_, err := testPool.Exec(t.Context(), `
-		TRUNCATE ledger_entries, transactions RESTART IDENTITY CASCADE;
+		TRUNCATE ledger_entries, transactions, outbox RESTART IDENTITY CASCADE;
 	`)
 	require.NoError(t, err)
 
@@ -202,4 +202,58 @@ func TestGetTransactionNotFound(t *testing.T) {
 		return err
 	})
 	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestOutboxEvents(t *testing.T) {
+
+	const (
+		limitEvents = 2
+	)
+
+	pgPool := setupTest(t)
+	store := New(pgPool)
+
+	err := query(t, store, func(q Querier) error {
+		for i := 1; i <= 3; i++ {
+			if err := q.CreateOutboxEvent(t.Context(), "test.event", "1", map[string]int{"n": i}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	var events []OutboxEvent
+
+	err = query(t, store, func(q Querier) error {
+		var err error
+		events, err = q.GetUnpublishedOutboxEvents(t.Context(), limitEvents)
+		return err
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, len(events), 2)
+	require.Equal(t, events[0].EventType, "test.event")
+	require.Equal(t, events[0].PartitionKey, "1")
+
+	require.Equal(t, events[1].EventType, "test.event")
+	require.Equal(t, events[1].PartitionKey, "1")
+
+	// Mark events as published
+	ids := []int64{events[0].ID, events[1].ID}
+
+	err = query(t, store, func(q Querier) error {
+		return q.MarkOutboxEventsPublished(t.Context(), ids)
+	})
+	require.NoError(t, err)
+
+	err = query(t, store, func(q Querier) error {
+		var err error
+		events, err = q.GetUnpublishedOutboxEvents(t.Context(), limitEvents)
+		return err
+	})
+	require.NoError(t, err)
+
+	// After the marking, only one event is unpublished
+	require.Equal(t, len(events), 1)
 }

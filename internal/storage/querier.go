@@ -11,6 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+const (
+	lockOutboxNumber = 1001
+)
+
 type Querier interface {
 	GetAccount(ctx context.Context, id int64) (Account, error)
 	GetAccountForUpdate(ctx context.Context, id int64) (Account, error)
@@ -23,6 +27,9 @@ type Querier interface {
 	CreateLedgerEntry(ctx context.Context, transactionID, accountID, amount int64) error
 	UpdateTransactionStatus(ctx context.Context, transactionID int64, status string) error
 	CreateOutboxEvent(ctx context.Context, eventType, partitionKey string, payload any) error
+	TryLockOutbox(ctx context.Context) (bool, error)
+	GetUnpublishedOutboxEvents(ctx context.Context, limit int) ([]OutboxEvent, error)
+	MarkOutboxEventsPublished(ctx context.Context, ids []int64) error
 }
 
 type dbtx interface {
@@ -244,10 +251,57 @@ func (q *queries) CreateOutboxEvent(ctx context.Context, eventType, partitionKey
 	}
 
 	_, err = q.db.Exec(ctx, `
-		INSERT INTO outbox
-		(event_type, partition_key, payload)
+		INSERT INTO outbox (event_type, partition_key, payload)
 		VALUES ($1, $2, $3);
 	`, eventType, partitionKey, js)
+
+	return err
+}
+
+func (q *queries) TryLockOutbox(ctx context.Context) (bool, error) {
+	var isOpen bool
+
+	err := q.db.QueryRow(ctx, `
+		SELECT pg_try_advisory_xact_lock($1)
+	`, lockOutboxNumber).Scan(&isOpen)
+
+	return isOpen, err
+}
+
+func (q *queries) GetUnpublishedOutboxEvents(ctx context.Context, limit int) ([]OutboxEvent, error) {
+	rows, err := q.db.Query(ctx, `
+		SELECT id, event_id::text, event_type, partition_key, payload
+		FROM outbox
+		WHERE published_at is NULL
+		ORDER BY id
+		LIMIT $1;
+	`, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []OutboxEvent
+
+	for rows.Next() {
+		var e OutboxEvent
+
+		if err := rows.Scan(&e.ID, &e.EventID, &e.EventType,
+			&e.PartitionKey, &e.Payload); err != nil {
+			return nil, err
+		}
+
+		events = append(events, e)
+	}
+
+	return events, rows.Err()
+}
+
+func (q *queries) MarkOutboxEventsPublished(ctx context.Context, ids []int64) error {
+	_, err := q.db.Exec(ctx, `
+		UPDATE outbox SET published_at = now() WHERE id = ANY($1);
+	`, ids)
 
 	return err
 }
