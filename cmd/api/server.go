@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -29,11 +28,11 @@ func serve(cfg config.Config, logger *slog.Logger, h http.Handler) error {
 	shutdownError := make(chan error)
 
 	go func() {
-		quit := make(chan os.Signal, 1)
-		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
 
-		sig := <-quit
-		logger.Info("shutting down server", "signal", sig)
+		<-ctx.Done()
+		logger.Info("shutting down server")
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
