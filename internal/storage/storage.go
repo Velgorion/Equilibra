@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Velgorion/equilibra/internal/config"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -12,6 +13,8 @@ import (
 const (
 	commitTimeout   = time.Second
 	rollbackTimeout = time.Minute
+
+	pingTimeout = 5 * time.Second
 )
 
 var (
@@ -57,6 +60,45 @@ type LedgerEntry struct {
 
 	// ReversalOf is set only for a reversal and indicates the transaction it reverses
 	ReversalOf *int64
+}
+
+type OutboxEvent struct {
+	ID           int64
+	EventID      string
+	EventType    string
+	PartitionKey string
+	Payload      []byte
+}
+
+// Open creates a connection pool configured from cfg and checks that the
+// database is reachable
+func Open(ctx context.Context, cfg config.Database) (*pgxpool.Pool, error) {
+	dbConfig, err := pgxpool.ParseConfig(cfg.DSN)
+	if err != nil {
+		return nil, err
+	}
+
+	dbConfig.MaxConnLifetime = cfg.MaxConnLifetime
+	dbConfig.MaxConnIdleTime = cfg.MaxConnIdleTime
+	dbConfig.MaxConns = cfg.MaxConns
+	dbConfig.MinConns = cfg.MinConns
+	dbConfig.MinIdleConns = cfg.MinIdleConns
+	dbConfig.MaxConnLifetimeJitter = cfg.MaxConnLifetimeJitter
+
+	dbpool, err := pgxpool.NewWithConfig(ctx, dbConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+
+	if err := dbpool.Ping(pingCtx); err != nil {
+		dbpool.Close()
+		return nil, err
+	}
+
+	return dbpool, nil
 }
 
 func New(db *pgxpool.Pool) *Storage {
