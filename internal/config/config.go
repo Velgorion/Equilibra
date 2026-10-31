@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -30,13 +31,39 @@ type Relay struct {
 	BatchSize int `env:"RELAY_BATCH_SIZE" envDefault:"100"`
 }
 
+type Notification struct {
+	Port          int    `env:"NOTIFICATION_PORT" envDefault:"8081"`
+	ConsumerGroup string `env:"NOTIFICATION_CONSUMER_GROUP" envDefault:"notification"`
+}
+
+type Redis struct {
+	Addr string `env:"REDIS_ADDR" envDefault:"redis:6379"`
+}
+
 type Config struct {
-	Database Database
-	Kafka    Kafka
-	Relay    Relay
-	Env      string `env:"ENV,required"`
-	Version  string `env:"VERSION,required"`
-	Port     int    `env:"PORT" envDefault:"8080"`
+	Database     Database
+	Kafka        Kafka
+	Relay        Relay
+	Notification Notification
+	Redis        Redis
+	Env          string `env:"ENV,required"`
+	Version      string `env:"VERSION,required"`
+	Port         int    `env:"PORT" envDefault:"8080"`
+}
+
+type NotificationConfig struct {
+	Kafka        Kafka
+	Redis        Redis
+	Notification Notification
+	LogLevel     slog.Level `env:"LOG_LEVEL" envDefault:"INFO"`
+}
+
+func LoadNotification() (NotificationConfig, error) {
+	var cfg NotificationConfig
+	if err := env.Parse(&cfg); err != nil {
+		return NotificationConfig{}, err
+	}
+	return cfg, nil
 }
 
 func Load() (Config, error) {
