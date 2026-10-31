@@ -56,7 +56,7 @@ func (r *Relay) Run(ctx context.Context) error {
 
 		n, err := r.publishBatch(ctx)
 		if err != nil {
-			r.logger.Error("publish outbox batch", "err", err)
+			r.logger.Error("publish outbox batch", "error", err)
 		}
 
 		// a full batch means there is a backlog: go for the next one right away
