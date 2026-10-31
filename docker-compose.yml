@@ -41,7 +41,7 @@ services:
       POSTGRES_DB: equilibra
 
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
@@ -80,7 +80,7 @@ services:
       KAFKA_LOG_DIRS: /var/lib/kafka/data
 
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
 
     healthcheck:
       test: [ "CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list" ]
@@ -100,6 +100,37 @@ services:
 
     depends_on:
       kafka:
+        condition: service_healthy
+
+  redis:
+    image: redis:8.8.3-alpine
+
+    ports:
+      - "127.0.0.1:6379:6379"
+
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: "5s"
+      timeout: "10s"
+
+  notification:
+    build: { context: ., target: notification }
+
+    environment:
+      KAFKA_BROKERS: "kafka:19092"
+      KAFKA_TOPIC: "ledger.entries"
+      REDIS_ADDR: "redis:6379"
+      LOG_LEVEL: "DEBUG"
+
+    ports:
+      - "127.0.0.1:8081:8081"
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
         condition: service_healthy
 
 volumes:
