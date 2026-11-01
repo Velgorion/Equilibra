@@ -48,7 +48,7 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Upgrate connection to a WebSocket
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"localhost:*"}})
 	if err != nil {
-		h.logger.Error("accept websocket client", "account_id", accountID, "err", err)
+		h.logger.Error("accept websocket client", "account_id", accountID, "error", err)
 		return
 	}
 	defer conn.CloseNow()
@@ -71,7 +71,7 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			err = conn.Write(wctx, websocket.MessageText, msg)
 			if err != nil {
-				h.logger.Info("write notification", "account_id", accountID, "err", err)
+				h.logger.Info("write notification", "account_id", accountID, "error", err)
 				cancel()
 				return
 			}
@@ -82,7 +82,7 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			pctx, cancel := context.WithTimeout(ctx, pingTimeout)
 			err = conn.Ping(pctx)
 			if err != nil {
-				h.logger.Info("send ping", "account_id", accountID, "err", err)
+				h.logger.Info("send ping", "account_id", accountID, "error", err)
 				cancel()
 				return
 			}
