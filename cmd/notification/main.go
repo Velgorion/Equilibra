@@ -60,8 +60,10 @@ func run() error {
 
 	hub := notification.NewHub()
 	dedup := notification.NewRedisDeduper(rdb)
+	publisher := notification.NewRedisPublisher(rdb)
+	subscriber := notification.NewSubscriber(rdb, hub, logger)
 
-	proc := notification.NewProcessor(dedup, hub, logger)
+	proc := notification.NewProcessor(dedup, publisher, logger)
 
 	consumer := notification.NewConsumer(client, proc, logger)
 
@@ -92,6 +94,16 @@ func run() error {
 		if err == nil && gctx.Err() == nil {
 			return errors.New("consumer stopped unexpectedly")
 		}
+		return err
+	})
+
+	// Run the subscriber in the errgroup
+	g.Go(func() error {
+		err := subscriber.Run(gctx)
+		if err == nil && gctx.Err() == nil {
+			return errors.New("subscriber stopped unexpectedly")
+		}
+
 		return err
 	})
 

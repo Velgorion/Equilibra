@@ -41,32 +41,37 @@ func (d *fakeDeduper) Done(ctx context.Context, eventID string) error {
 	return d.doneErr
 }
 
-type sendCall struct {
+type publishCall struct {
 	accountID int64
 	msg       []byte
 }
 
-// fakeSender records every notification handed to it.
-type fakeSender struct {
-	calls []sendCall
+// fakePublisher records every notification handed to it, or fails with err if it is set.
+type fakePublisher struct {
+	err   error
+	calls []publishCall
 }
 
-var _ Sender = (*fakeSender)(nil)
+var _ Publisher = (*fakePublisher)(nil)
 
-func (s *fakeSender) Send(accountID int64, msg []byte) {
-	s.calls = append(s.calls, sendCall{accountID: accountID, msg: msg})
+func (pub *fakePublisher) Publish(ctx context.Context, accountID int64, msg []byte) error {
+	if pub.err != nil {
+		return pub.err
+	}
+	pub.calls = append(pub.calls, publishCall{accountID: accountID, msg: msg})
+	return nil
 }
 
 const testEventID = "event_id"
 
-func newTestProcessor() (*Processor, *fakeDeduper, *fakeSender) {
+func newTestProcessor() (*Processor, *fakeDeduper, *fakePublisher) {
 	d := &fakeDeduper{results: []ClaimResult{ClaimAcquired}}
-	s := &fakeSender{}
+	pub := &fakePublisher{}
 
-	p := NewProcessor(d, s, slog.New(slog.DiscardHandler))
+	p := NewProcessor(d, pub, slog.New(slog.DiscardHandler))
 	p.retryInterval = time.Millisecond
 
-	return p, d, s
+	return p, d, pub
 }
 
 // entryPayload is the body of an entry.posted event as the relay publishes it.
@@ -88,16 +93,16 @@ func entryPayload(t *testing.T, accountID int64) []byte {
 }
 
 func TestUnitHandleSendsNewEvent(t *testing.T) {
-	p, d, s := newTestProcessor()
+	p, d, pub := newTestProcessor()
 
 	err := p.Handle(t.Context(), testEventID, entryPayload(t, 10))
 	require.NoError(t, err)
 
-	require.Len(t, s.calls, 1)
-	require.Equal(t, int64(10), s.calls[0].accountID)
+	require.Len(t, pub.calls, 1)
+	require.Equal(t, int64(10), pub.calls[0].accountID)
 
 	var got map[string]any
-	require.NoError(t, json.Unmarshal(s.calls[0].msg, &got))
+	require.NoError(t, json.Unmarshal(pub.calls[0].msg, &got))
 	require.Equal(t, testEventID, got["event_id"])
 	require.EqualValues(t, 10, got["account_id"])
 	require.EqualValues(t, 500, got["amount"])
@@ -107,19 +112,19 @@ func TestUnitHandleSendsNewEvent(t *testing.T) {
 }
 
 func TestUnitHandleSkipsDoneEvent(t *testing.T) {
-	p, d, s := newTestProcessor()
+	p, d, pub := newTestProcessor()
 	d.results = []ClaimResult{ClaimDone}
 
 	err := p.Handle(t.Context(), testEventID, entryPayload(t, 10))
 	require.NoError(t, err)
 
 	// a repeat of an event that was already sent
-	require.Empty(t, s.calls)
+	require.Empty(t, pub.calls)
 	require.Zero(t, d.dones)
 }
 
 func TestUnitHandleWaitsForBusyEvent(t *testing.T) {
-	p, d, s := newTestProcessor()
+	p, d, pub := newTestProcessor()
 
 	d.results = []ClaimResult{ClaimBusy, ClaimBusy, ClaimAcquired}
 
@@ -127,11 +132,11 @@ func TestUnitHandleWaitsForBusyEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, 3, d.claims)
-	require.Len(t, s.calls, 1)
+	require.Len(t, pub.calls, 1)
 }
 
 func TestUnitHandleStopsWaitingOnCancel(t *testing.T) {
-	p, d, s := newTestProcessor()
+	p, d, pub := newTestProcessor()
 	d.results = []ClaimResult{ClaimBusy}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -140,54 +145,54 @@ func TestUnitHandleStopsWaitingOnCancel(t *testing.T) {
 	err := p.Handle(ctx, testEventID, entryPayload(t, 10))
 
 	require.ErrorIs(t, err, context.Canceled)
-	require.Empty(t, s.calls)
+	require.Empty(t, pub.calls)
 	require.Zero(t, d.dones)
 }
 
 func TestUnitHandleClaimFails(t *testing.T) {
-	p, d, s := newTestProcessor()
+	p, d, pub := newTestProcessor()
 	d.claimErr = errors.New("redis is down")
 
 	err := p.Handle(t.Context(), testEventID, entryPayload(t, 10))
 
 	require.ErrorIs(t, err, d.claimErr)
-	require.Empty(t, s.calls)
+	require.Empty(t, pub.calls)
 }
 
 func TestUnitHandleUnexpectedClaimResult(t *testing.T) {
-	p, d, s := newTestProcessor()
+	p, d, pub := newTestProcessor()
 	d.results = []ClaimResult{ClaimUnknown}
 
 	err := p.Handle(t.Context(), testEventID, entryPayload(t, 10))
 
 	require.Error(t, err)
-	require.Empty(t, s.calls)
+	require.Empty(t, pub.calls)
 }
 
 func TestUnitHandleSkipsBadPayload(t *testing.T) {
-	p, d, s := newTestProcessor()
+	p, d, pub := newTestProcessor()
 
 	err := p.Handle(t.Context(), testEventID, []byte(`{not json`))
 
 	// a broken message will never get better: skip it instead of blocking the partition
 	require.NoError(t, err)
-	require.Empty(t, s.calls)
+	require.Empty(t, pub.calls)
 
 	require.Equal(t, 1, d.dones)
 }
 
 func TestUnitHandleSkipsEmptyEventID(t *testing.T) {
-	p, d, s := newTestProcessor()
+	p, d, pub := newTestProcessor()
 
 	err := p.Handle(t.Context(), "", entryPayload(t, 10))
 
 	require.NoError(t, err)
 	require.Zero(t, d.claims)
-	require.Empty(t, s.calls)
+	require.Empty(t, pub.calls)
 }
 
 func TestUnitHandleDoneFailsAfterSend(t *testing.T) {
-	p, d, s := newTestProcessor()
+	p, d, pub := newTestProcessor()
 	d.doneErr = errors.New("redis is down")
 
 	err := p.Handle(t.Context(), testEventID, entryPayload(t, 10))
@@ -195,5 +200,17 @@ func TestUnitHandleDoneFailsAfterSend(t *testing.T) {
 	// the notification is already delivered: returning the error would make the
 	// consumer retry the record and send it a second time
 	require.NoError(t, err)
-	require.Len(t, s.calls, 1)
+	require.Len(t, pub.calls, 1)
+}
+
+func TestUnitHandlePublishFails(t *testing.T) {
+	p, d, pub := newTestProcessor()
+	pub.err = errors.New("redis is down")
+
+	err := p.Handle(t.Context(), testEventID, entryPayload(t, 10))
+
+	// nobody got the notification: the consumer must retry the record, so the
+	// event may not be marked as notified
+	require.ErrorIs(t, err, pub.err)
+	require.Zero(t, d.dones)
 }

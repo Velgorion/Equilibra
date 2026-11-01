@@ -14,6 +14,11 @@ type Sender interface {
 	Send(accountID int64, msg []byte)
 }
 
+// Publisher publish the notifications for the accountID for futher sending by copies of notification
+type Publisher interface {
+	Publish(ctx context.Context, accountID int64, msg []byte) error
+}
+
 // notification is the message sent to the browser over WebSocket.
 type notification struct {
 	EventID string `json:"event_id"`
@@ -21,29 +26,28 @@ type notification struct {
 }
 
 // Processor is a core component tasked with checking events for duplicates (using Deduper)
-// and sending them out as notifications (using Sender).
+// and publishing them out as notifications (using Publisher).
 type Processor struct {
 	dedup         Deduper
-	sender        Sender
+	publisher     Publisher
 	logger        *slog.Logger
 	retryInterval time.Duration
 }
 
 // NewProcessor creates a Processor.
-func NewProcessor(d Deduper, s Sender, l *slog.Logger) *Processor {
+func NewProcessor(d Deduper, p Publisher, l *slog.Logger) *Processor {
 	return &Processor{
 		dedup:         d,
-		sender:        s,
+		publisher:     p,
 		logger:        l,
 		retryInterval: 1 * time.Second,
 	}
 }
 
-// Handle delivers the event with the given id to the connections of its account,
-// unless it was already delivered.
+// Handle publishes the notification for the event with the given id, unless it was already published.
 //
 // A nil error means the record is finished and its offset can be committed: the
-// notification was sent, it had been sent before, or the record is unusable and
+// notification was published, it had been published before, or the record is unusable and
 // was skipped. An error means a temporary failure, such as Redis being down: the
 // caller must retry the same record and must not commit it.
 //
@@ -98,14 +102,18 @@ claim:
 		return err
 	}
 
-	// Send notification to the connection of AccountID
-	p.sender.Send(entryPosted.AccountID, msg)
-	p.logger.Debug("notification sent", "event_id", eventID, "account_id", entryPosted.AccountID)
+	// Publish notification
+	err = p.publisher.Publish(ctx, entryPosted.AccountID, msg)
+	if err != nil {
+		return err
+	}
+
+	p.logger.Debug("notification published", "event_id", eventID, "account_id", entryPosted.AccountID)
 
 	// Mark event as notified
 	err = p.dedup.Done(ctx, eventID)
 	if err != nil {
-		p.logger.Warn("mark event as notified", "event_id", eventID, "error", err)
+		p.logger.Warn("mark event as published", "event_id", eventID, "error", err)
 		return nil
 	}
 
