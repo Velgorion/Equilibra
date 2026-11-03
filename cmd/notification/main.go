@@ -84,7 +84,7 @@ func run() error {
 	defer stop()
 
 	// Create errgroup for the concurrent operation of our services
-	// (consumer, server, shutdown) and an error occur in any one of them
+	// (consumer, subscriber, server, shutdown) and an error occur in any one of them
 	// will cause the cancellation of gctx
 	g, gctx := errgroup.WithContext(ctx)
 
