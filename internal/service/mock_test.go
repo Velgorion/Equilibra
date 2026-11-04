@@ -18,16 +18,17 @@ type mockQuerier struct {
 	getAccountBalanceFn   func(ctx context.Context, id int64) (int64, error)
 	getAccountHistoryFn   func(ctx context.Context, accountID int64,
 		limit, before int64) ([]storage.LedgerEntry, error)
-	getSystemAccountByCodeFn  func(ctx context.Context, code string) (storage.Account, error)
-	createTransactionFn       func(ctx context.Context, t storage.Transaction) (storage.Transaction, error)
-	getTransactionFn          func(ctx context.Context, key string) (storage.Transaction, error)
-	getTransactionByIDFn      func(ctx context.Context, transactionID int64) (storage.Transaction, error)
-	createLedgerEntryFn       func(ctx context.Context, transactionID, accountID, amount int64) error
-	updateTransactionStatusFn func(ctx context.Context, transactionID int64, status string) error
-	createOutboxEventFn       func(ctx context.Context, eventType, partitionKey string, payload any) error
-	tryLockOutboxFn           func(ctx context.Context) (bool, error)
-	getUnpublishedOutboxFn    func(ctx context.Context, limit int) ([]storage.OutboxEvent, error)
-	markOutboxPublishedFn     func(ctx context.Context, ids []int64) error
+	getSystemAccountByCodeFn     func(ctx context.Context, code string) (storage.Account, error)
+	createTransactionFn          func(ctx context.Context, t storage.Transaction) (storage.Transaction, error)
+	getTransactionFn             func(ctx context.Context, key string) (storage.Transaction, error)
+	getTransactionByIDFn         func(ctx context.Context, transactionID int64) (storage.Transaction, error)
+	createLedgerEntryFn          func(ctx context.Context, transactionID, accountID, amount int64) error
+	updateTransactionStatusFn    func(ctx context.Context, transactionID int64, status string) error
+	createOutboxEventFn          func(ctx context.Context, eventType, partitionKey string, payload any) error
+	tryLockOutboxFn              func(ctx context.Context) (bool, error)
+	getUnpublishedOutboxFn       func(ctx context.Context, limit int) ([]storage.OutboxEvent, error)
+	markOutboxPublishedFn        func(ctx context.Context, ids []int64) error
+	oldestUnpublishedOutboxAgeFn func(ctx context.Context) (float64, error)
 
 	// ledgerEntries records every entry written, so a test can assert that a
 	// rejected operation moved no money at all.
@@ -163,6 +164,14 @@ func (m *mockQuerier) CreateLedgerEntry(ctx context.Context, transactionID, acco
 	}
 
 	return m.createLedgerEntryFn(ctx, transactionID, accountID, amount)
+}
+
+func (m *mockQuerier) OldestUnpublishedOutboxAge(ctx context.Context) (float64, error) {
+	if m.oldestUnpublishedOutboxAgeFn == nil {
+		m.t.Fatalf("unexpected call: OldestUnpublishedOutboxAge()")
+	}
+
+	return m.oldestUnpublishedOutboxAgeFn(ctx)
 }
 
 // mockStorage implements the Storage interface of this package

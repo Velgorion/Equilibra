@@ -32,6 +32,7 @@ type Relay struct {
 	publisher Publisher
 	logger    *slog.Logger
 	send      SendingParams
+	metrics   *Metrics
 }
 
 type SendingParams struct {
@@ -39,12 +40,13 @@ type SendingParams struct {
 	Interval  time.Duration
 }
 
-func New(s Storage, p Publisher, sp SendingParams, l *slog.Logger) *Relay {
+func New(s Storage, p Publisher, sp SendingParams, l *slog.Logger, m *Metrics) *Relay {
 	return &Relay{
 		store:     s,
 		publisher: p,
 		logger:    l,
 		send:      sp,
+		metrics:   m,
 	}
 }
 
@@ -97,7 +99,14 @@ func (r *Relay) publishBatch(ctx context.Context) (int, error) {
 		}
 
 		messages, ids := disassembleEvents(events)
-		if err = r.publisher.Publish(ctx, messages); err != nil {
+
+		start := time.Now()
+		err = r.publisher.Publish(ctx, messages)
+
+		// Add to the metric the amount of time for publishing a batch of events
+		r.metrics.duration.Observe(time.Since(start).Seconds())
+
+		if err != nil {
 			return err
 		}
 
@@ -114,8 +123,16 @@ func (r *Relay) publishBatch(ctx context.Context) (int, error) {
 		if errors.Is(err, ErrOutboxLocked) {
 			return 0, nil
 		}
+
+		// Increment the number of errors during publishing.
+		// ErrOutboxLocked is not considered an error
+		r.metrics.errors.Inc()
+
 		return 0, err
 	}
+
+	// Add the number of published events to the metric
+	r.metrics.published.Add(float64(sent))
 
 	return sent, nil
 }

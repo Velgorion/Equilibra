@@ -2,12 +2,14 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Velgorion/equilibra/internal/events"
 	"github.com/stretchr/testify/require"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -256,4 +258,42 @@ func TestOutboxEvents(t *testing.T) {
 
 	// After the marking, only one event is unpublished
 	require.Equal(t, len(events), 1)
+}
+
+func TestOldestUnpublishedOutboxAge(t *testing.T) {
+	pgPool := setupTest(t)
+	store := New(pgPool)
+
+	payload := []byte("{hello: <3}")
+
+	js, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	var secs float64
+
+	err = query(t, store, func(q Querier) error {
+		var err error
+		secs, err = q.OldestUnpublishedOutboxAge(t.Context())
+		return err
+	})
+
+	// in the case of empty outbox returns 0 instead of an error
+	require.NoError(t, err)
+	require.Equal(t, float64(0), secs)
+
+	_, err = store.db.Exec(t.Context(), `
+		INSERT INTO outbox (event_type, partition_key, payload, created_at)
+		VALUES ($1, $2, $3, now() - interval '5 seconds');
+	`, events.EntryTypePosted, "10", js)
+
+	require.NoError(t, err)
+
+	err = query(t, store, func(q Querier) error {
+		var err error
+		secs, err = q.OldestUnpublishedOutboxAge(t.Context())
+		return err
+	})
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, secs, float64(5))
 }

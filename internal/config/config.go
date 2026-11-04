@@ -29,6 +29,8 @@ type Relay struct {
 
 	// How many events the relay will take at one time
 	BatchSize int `env:"RELAY_BATCH_SIZE" envDefault:"100"`
+
+	MetricsPort int `env:"METRICS_PORT" envDefault:"2112"`
 }
 
 type Notification struct {

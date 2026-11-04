@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/Velgorion/equilibra/internal/storage"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,7 +87,7 @@ func newTestRelay(t *testing.T) (*Relay, *fakeStore, *fakeQuerier, *fakePublishe
 	st := &fakeStore{querier: q}
 	p := &fakePublisher{}
 	r := New(st, p, SendingParams{BatchSize: 100, Interval: time.Millisecond},
-		slog.New(slog.DiscardHandler))
+		slog.New(slog.DiscardHandler), NewMetrics(prometheus.NewRegistry()))
 
 	return r, st, q, p
 }
@@ -192,4 +194,73 @@ func TestUnitRunStopsWhenCancelled(t *testing.T) {
 
 	// a cancelled relay must not start a new batch
 	require.False(t, q.lockCalled)
+}
+
+func TestUnitRelayMetricsPublish(t *testing.T) {
+	r, _, q, p := newTestRelay(t)
+
+	q.events = []storage.OutboxEvent{
+		outboxEvent(1, "11", "10"),
+		outboxEvent(2, "22", "10"),
+		outboxEvent(3, "33", "10"),
+	}
+
+	n, err := r.publishBatch(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Len(t, p.messages, 3)
+	require.Equal(t, []int64{1, 2, 3}, q.markedIDs)
+
+	require.Equal(t, float64(3), testutil.ToFloat64(r.metrics.published))
+	require.Equal(t, float64(0), testutil.ToFloat64(r.metrics.errors))
+}
+
+func TestUnitRelayMetricsPublishFails(t *testing.T) {
+	r, st, q, p := newTestRelay(t)
+
+	q.events = []storage.OutboxEvent{
+		outboxEvent(1, "11", "10"),
+		outboxEvent(2, "22", "10"),
+		outboxEvent(3, "33", "10"),
+	}
+
+	p.err = errors.New("broker is down")
+
+	n, err := r.publishBatch(t.Context())
+	require.ErrorIs(t, err, p.err)
+	require.Zero(t, n)
+
+	// nothing may be marked as published
+	require.Empty(t, q.markedIDs)
+	require.False(t, st.committed)
+
+	require.Equal(t, float64(0), testutil.ToFloat64(r.metrics.published))
+	require.Equal(t, float64(1), testutil.ToFloat64(r.metrics.errors))
+}
+
+func TestUnitRelayMetricsLockNotGranted(t *testing.T) {
+	r, st, q, p := newTestRelay(t)
+
+	q.events = []storage.OutboxEvent{
+		outboxEvent(1, "11", "10"),
+		outboxEvent(2, "22", "10"),
+		outboxEvent(3, "33", "10"),
+	}
+
+	q.lockGranted = false
+	n, err := r.publishBatch(t.Context())
+
+	// this is not an error, just a skipped turn
+	require.NoError(t, err)
+	require.Zero(t, n)
+
+	require.True(t, q.lockCalled)
+	require.False(t, q.readCalled)
+	require.Zero(t, p.calls)
+	require.Empty(t, q.markedIDs)
+	require.False(t, st.committed)
+
+	require.Equal(t, float64(0), testutil.ToFloat64(r.metrics.published))
+	require.Equal(t, float64(0), testutil.ToFloat64(r.metrics.errors))
 }

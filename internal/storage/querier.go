@@ -30,6 +30,7 @@ type Querier interface {
 	TryLockOutbox(ctx context.Context) (bool, error)
 	GetUnpublishedOutboxEvents(ctx context.Context, limit int) ([]OutboxEvent, error)
 	MarkOutboxEventsPublished(ctx context.Context, ids []int64) error
+	OldestUnpublishedOutboxAge(ctx context.Context) (float64, error)
 }
 
 type dbtx interface {
@@ -304,4 +305,26 @@ func (q *queries) MarkOutboxEventsPublished(ctx context.Context, ids []int64) er
 	`, ids)
 
 	return err
+}
+
+func (q *queries) OldestUnpublishedOutboxAge(ctx context.Context) (float64, error) {
+	var secs float64
+
+	err := q.db.QueryRow(ctx, `
+		SELECT EXTRACT(EPOCH FROM now() - created_at)
+		FROM outbox
+		WHERE published_at IS NULL
+		ORDER BY id
+		LIMIT 1;
+	`).Scan(&secs)
+
+	if err != nil {
+		// If there are no unpublished events, this is not an error
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	return secs, nil
 }
