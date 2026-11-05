@@ -137,6 +137,25 @@ services:
       redis:
         condition: service_healthy
 
+  prometheus:
+    image: prom/prometheus:v3.15.1
+
+    ports:
+      - "127.0.0.1:9090:9090"
+
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+      - prom_data:/prometheus
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.11.0
+    command: [ "--kafka.server=kafka:19092" ]
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
 volumes:
   pgdata:
   kafkadata:
+  prom_data:
