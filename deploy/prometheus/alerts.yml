@@ -1,0 +1,35 @@
+groups:
+  - name: relay
+    rules:
+      - alert: OutboxStuck
+        expr: max(relay_outbox_oldest_unpublished_age_seconds) > 60
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Outbox events are not being published
+          description: The oldest unpublished event is {{ $value | humanizeDuration }} old.
+  
+  - name: notification
+
+    rules:
+      - alert: NotificationLag
+        expr: sum by (consumergroup) (kafka_consumergroup_lag{consumergroup="notification", topic="ledger.entries"}) > 100
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Cumulative lag of the consumer group
+          description: The summary lag of the {{ $labels.consumergroup }} consumer group is {{ $value }} events.
+  
+  - name: targets
+
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target {{ $labels.instance }} is down"
+          description: "Instance {{ $labels.instance }} in the job {{ $labels.job }} unavailable for 1 minute"
