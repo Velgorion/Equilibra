@@ -36,6 +36,7 @@ type Relay struct {
 type Notification struct {
 	Port          int    `env:"NOTIFICATION_PORT" envDefault:"8081"`
 	ConsumerGroup string `env:"NOTIFICATION_CONSUMER_GROUP" envDefault:"notification"`
+	MetricsPort   int    `env:"NOTIFICATION_METRICS_PORT" envDefault:"2112"`
 }
 
 type Redis struct {

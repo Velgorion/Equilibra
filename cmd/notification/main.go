@@ -15,6 +15,9 @@ import (
 	"github.com/Velgorion/equilibra/internal/config"
 	"github.com/Velgorion/equilibra/internal/notification"
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
@@ -63,20 +66,39 @@ func run() error {
 	publisher := notification.NewRedisPublisher(rdb)
 	subscriber := notification.NewSubscriber(rdb, hub, logger)
 
-	proc := notification.NewProcessor(dedup, publisher, logger)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+	metrics := notification.NewMetrics(reg, hub)
 
-	consumer := notification.NewConsumer(client, proc, logger)
+	proc := notification.NewProcessor(dedup, publisher, metrics, logger)
+
+	consumer := notification.NewConsumer(client, proc, metrics, logger)
 
 	// Register WSHandler for the 'GET /v1/ws' route
-	mux := http.NewServeMux()
-	mux.Handle("GET /v1/ws", notification.NewWSHandler(hub, logger))
+	notificationMux := http.NewServeMux()
+	notificationMux.Handle("GET /v1/ws", notification.NewWSHandler(hub, logger))
 
 	// Not configure other timeouts in the way that it's fine for a WebSocket connection
 	// to be idle for a long time
-	srv := &http.Server{
+	notificationSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Notification.Port),
 		ReadHeaderTimeout: 5 * time.Second,
-		Handler:           mux,
+		Handler:           notificationMux,
+	}
+
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+
+	metricsSrv := &http.Server{
+		Addr:         fmt.Sprintf(":%d", cfg.Notification.MetricsPort),
+		Handler:      metricsMux,
+		IdleTimeout:  time.Minute,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
 	// Cancel the ctx when one the listed signal arrives
@@ -109,14 +131,22 @@ func run() error {
 
 	// Start the server in the errgroup
 	g.Go(func() error {
-		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		if err := notificationSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
 		return nil
 	})
 
-	// Wait for the cancellation of context and close all ws-connections
-	// and the server
+	// Start the metrics server in the errgroup
+	g.Go(func() error {
+		if err := metricsSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	})
+
+	// Wait for the cancellation of context, then close the ws-connections and stop
+	// both servers
 	g.Go(func() error {
 		<-gctx.Done()
 
@@ -125,10 +155,14 @@ func run() error {
 		hub.CloseAll()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+
+		return errors.Join(
+			notificationSrv.Shutdown(shutdownCtx),
+			metricsSrv.Shutdown(shutdownCtx),
+		)
 	})
 
-	logger.Info("notification is running", "addr", srv.Addr)
+	logger.Info("notification is running", "addr", notificationSrv.Addr)
 	return g.Wait()
 }
 

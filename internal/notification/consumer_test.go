@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -88,8 +90,8 @@ func produce(t *testing.T, brokers []string, eventIDs ...string) {
 
 // runConsumer runs one member of the consumer group until the handler stops it,
 // then closes the client so that the member leaves the group before the test
-// starts the next one.
-func runConsumer(t *testing.T, brokers []string, h *fakeHandler) {
+// starts the next one. It returns the metrics of that member.
+func runConsumer(t *testing.T, brokers []string, h *fakeHandler) *Metrics {
 	t.Helper()
 
 	client, err := kgo.NewClient(
@@ -109,11 +111,14 @@ func runConsumer(t *testing.T, brokers []string, h *fakeHandler) {
 		h.attempts = make(map[string]int)
 	}
 
-	c := NewConsumer(client, h, slog.New(slog.DiscardHandler))
+	m := NewMetrics(prometheus.NewRegistry(), NewHub())
+	c := NewConsumer(client, h, m, slog.New(slog.DiscardHandler))
 	c.retryInterval = time.Millisecond
 
 	require.NoError(t, c.Run(ctx))
 	require.NotErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+
+	return m
 }
 
 func TestConsumerHandlesRecordsInOrder(t *testing.T) {
@@ -121,10 +126,11 @@ func TestConsumerHandlesRecordsInOrder(t *testing.T) {
 	produce(t, brokers, "e1", "e2", "e3")
 
 	h := &fakeHandler{stopAfterHandled: 3}
-	runConsumer(t, brokers, h)
+	m := runConsumer(t, brokers, h)
 
 	// the event id is taken from the record header, in the order of the partition
 	require.Equal(t, []string{"e1", "e2", "e3"}, h.handled)
+	require.Zero(t, testutil.ToFloat64(m.errors))
 }
 
 func TestConsumerRetriesTheSameRecord(t *testing.T) {
@@ -136,12 +142,15 @@ func TestConsumerRetriesTheSameRecord(t *testing.T) {
 		fail:             func(id string, attempt int) bool { return id == "e1" && attempt <= 2 },
 		stopAfterHandled: 2,
 	}
-	runConsumer(t, brokers, h)
+	m := runConsumer(t, brokers, h)
 
 	// e1 is retried until it succeeds, and e2 waits for it: skipping e1 would
 	// lose its notification
 	require.Equal(t, []string{"e1", "e1", "e1", "e2"}, h.calls)
 	require.Equal(t, []string{"e1", "e2"}, h.handled)
+
+	// every failed attempt is counted, not every failed record
+	require.Equal(t, float64(2), testutil.ToFloat64(m.errors))
 }
 
 func TestConsumerCommitsHandledRecords(t *testing.T) {
@@ -171,8 +180,11 @@ func TestConsumerStopCommitsOnlyHandledRecords(t *testing.T) {
 		fail:           func(id string, _ int) bool { return id == "e2" },
 		stopAfterCalls: 3, // e1, e2, e2
 	}
-	runConsumer(t, brokers, first)
+	m := runConsumer(t, brokers, first)
 	require.Equal(t, []string{"e1"}, first.handled)
+
+	// the second failure of e2 comes with the stop: shutting down is not a failure
+	require.Equal(t, float64(1), testutil.ToFloat64(m.errors))
 
 	// only e1 may be committed. Committing the whole fetch would make e2 and e3
 	// count as read and their notifications would be lost

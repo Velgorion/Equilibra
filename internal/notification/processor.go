@@ -32,15 +32,17 @@ type Processor struct {
 	publisher     Publisher
 	logger        *slog.Logger
 	retryInterval time.Duration
+	metrics       *Metrics
 }
 
 // NewProcessor creates a Processor.
-func NewProcessor(d Deduper, p Publisher, l *slog.Logger) *Processor {
+func NewProcessor(d Deduper, p Publisher, m *Metrics, l *slog.Logger) *Processor {
 	return &Processor{
 		dedup:         d,
 		publisher:     p,
 		logger:        l,
 		retryInterval: 1 * time.Second,
+		metrics:       m,
 	}
 }
 
@@ -56,6 +58,8 @@ func NewProcessor(d Deduper, p Publisher, l *slog.Logger) *Processor {
 func (p *Processor) Handle(ctx context.Context, eventID string, payload []byte) error {
 
 	if eventID == "" {
+		p.metrics.events.WithLabelValues(labelValueNoEventID).Inc()
+
 		p.logger.Error("empty EventID")
 		return nil
 	}
@@ -73,6 +77,8 @@ claim:
 			break claim
 
 		case ClaimDone:
+			p.metrics.events.WithLabelValues(labelValueDuplicate).Inc()
+
 			p.logger.Debug("skip already notified event", "event_id", eventID)
 			return nil
 
@@ -93,7 +99,14 @@ claim:
 	err := json.Unmarshal(payload, &entryPosted)
 	if err != nil {
 		p.logger.Warn("unmarshal payload into events.EntryPosted", "event_id", eventID, "error", err)
-		return p.dedup.Done(ctx, eventID)
+		err = p.dedup.Done(ctx, eventID)
+		if err != nil {
+			return err
+		}
+
+		p.metrics.events.WithLabelValues(labelValueMalformed).Inc()
+
+		return nil
 	}
 
 	// Compose the notification
@@ -107,6 +120,8 @@ claim:
 	if err != nil {
 		return err
 	}
+
+	p.metrics.events.WithLabelValues(labelValuePublished).Inc()
 
 	p.logger.Debug("notification published", "event_id", eventID, "account_id", entryPosted.AccountID)
 

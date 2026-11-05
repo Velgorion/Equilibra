@@ -94,6 +94,18 @@ func (h *Hub) CloseAll() {
 	}
 }
 
+func (h *Hub) Connections() int {
+	var conns int
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, clients := range h.clients {
+		conns += len(clients)
+	}
+
+	return conns
+}
+
 func (c *client) disconnect(reason websocket.StatusCode) {
 	c.closeOnce.Do(func() {
 		c.reason = reason

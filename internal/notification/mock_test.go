@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/Velgorion/equilibra/internal/events"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,7 +70,7 @@ func newTestProcessor() (*Processor, *fakeDeduper, *fakePublisher) {
 	d := &fakeDeduper{results: []ClaimResult{ClaimAcquired}}
 	pub := &fakePublisher{}
 
-	p := NewProcessor(d, pub, slog.New(slog.DiscardHandler))
+	p := NewProcessor(d, pub, NewMetrics(prometheus.NewRegistry(), NewHub()), slog.New(slog.DiscardHandler))
 	p.retryInterval = time.Millisecond
 
 	return p, d, pub
@@ -92,6 +94,21 @@ func entryPayload(t *testing.T, accountID int64) []byte {
 	return data
 }
 
+// results is the expected value of notification_events_total for each result.
+// Any result left out is expected to be 0.
+type results map[string]float64
+
+// requireEvents checks every result, not only the expected one, so that an event
+// counted under the wrong result is caught too.
+func requireEvents(t *testing.T, m *Metrics, want results) {
+	t.Helper()
+
+	for _, result := range []string{labelValuePublished, labelValueDuplicate, labelValueMalformed, labelValueNoEventID} {
+		got := testutil.ToFloat64(m.events.WithLabelValues(result))
+		require.Equal(t, want[result], got, "notification_events_total{result=%q}", result)
+	}
+}
+
 func TestUnitHandleSendsNewEvent(t *testing.T) {
 	p, d, pub := newTestProcessor()
 
@@ -109,6 +126,7 @@ func TestUnitHandleSendsNewEvent(t *testing.T) {
 	require.EqualValues(t, 9, got["counterparty_id"])
 
 	require.Equal(t, 1, d.dones)
+	requireEvents(t, p.metrics, results{labelValuePublished: 1})
 }
 
 func TestUnitHandleSkipsDoneEvent(t *testing.T) {
@@ -121,6 +139,7 @@ func TestUnitHandleSkipsDoneEvent(t *testing.T) {
 	// a repeat of an event that was already sent
 	require.Empty(t, pub.calls)
 	require.Zero(t, d.dones)
+	requireEvents(t, p.metrics, results{labelValueDuplicate: 1})
 }
 
 func TestUnitHandleWaitsForBusyEvent(t *testing.T) {
@@ -133,6 +152,8 @@ func TestUnitHandleWaitsForBusyEvent(t *testing.T) {
 
 	require.Equal(t, 3, d.claims)
 	require.Len(t, pub.calls, 1)
+
+	requireEvents(t, p.metrics, results{labelValuePublished: 1})
 }
 
 func TestUnitHandleStopsWaitingOnCancel(t *testing.T) {
@@ -147,6 +168,7 @@ func TestUnitHandleStopsWaitingOnCancel(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, pub.calls)
 	require.Zero(t, d.dones)
+	requireEvents(t, p.metrics, results{})
 }
 
 func TestUnitHandleClaimFails(t *testing.T) {
@@ -157,6 +179,7 @@ func TestUnitHandleClaimFails(t *testing.T) {
 
 	require.ErrorIs(t, err, d.claimErr)
 	require.Empty(t, pub.calls)
+	requireEvents(t, p.metrics, results{})
 }
 
 func TestUnitHandleUnexpectedClaimResult(t *testing.T) {
@@ -167,6 +190,7 @@ func TestUnitHandleUnexpectedClaimResult(t *testing.T) {
 
 	require.Error(t, err)
 	require.Empty(t, pub.calls)
+	requireEvents(t, p.metrics, results{})
 }
 
 func TestUnitHandleSkipsBadPayload(t *testing.T) {
@@ -179,6 +203,7 @@ func TestUnitHandleSkipsBadPayload(t *testing.T) {
 	require.Empty(t, pub.calls)
 
 	require.Equal(t, 1, d.dones)
+	requireEvents(t, p.metrics, results{labelValueMalformed: 1})
 }
 
 func TestUnitHandleSkipsEmptyEventID(t *testing.T) {
@@ -189,6 +214,7 @@ func TestUnitHandleSkipsEmptyEventID(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, d.claims)
 	require.Empty(t, pub.calls)
+	requireEvents(t, p.metrics, results{labelValueNoEventID: 1})
 }
 
 func TestUnitHandleDoneFailsAfterSend(t *testing.T) {
@@ -201,6 +227,9 @@ func TestUnitHandleDoneFailsAfterSend(t *testing.T) {
 	// consumer retry the record and send it a second time
 	require.NoError(t, err)
 	require.Len(t, pub.calls, 1)
+
+	// the notification went out, so it counts as published
+	requireEvents(t, p.metrics, results{labelValuePublished: 1})
 }
 
 func TestUnitHandlePublishFails(t *testing.T) {
@@ -213,4 +242,18 @@ func TestUnitHandlePublishFails(t *testing.T) {
 	// event may not be marked as notified
 	require.ErrorIs(t, err, pub.err)
 	require.Zero(t, d.dones)
+	requireEvents(t, p.metrics, results{})
+}
+
+func TestUnitHandleBadPayloadDoneFails(t *testing.T) {
+	p, d, pub := newTestProcessor()
+	d.doneErr = errors.New("redis is down")
+
+	err := p.Handle(t.Context(), testEventID, []byte(`{not json`))
+
+	// the consumer retries the record and the event comes here again, so it may
+	// be counted as malformed only once the skip is recorded
+	require.ErrorIs(t, err, d.doneErr)
+	require.Empty(t, pub.calls)
+	requireEvents(t, p.metrics, results{})
 }

@@ -131,4 +131,22 @@ func TestHubConcurrently(t *testing.T) {
 
 	// Has to be empty after all the work
 	require.Empty(t, hub.clients)
+	require.Zero(t, hub.Connections())
+}
+
+func TestHubConnectionsAfterSlowClientLeaves(t *testing.T) {
+	hub := NewHub()
+	slow := hub.Register(10)
+	hub.Register(11)
+	require.Equal(t, 2, hub.Connections())
+
+	// the slow client's queue fills up, and one more message drops it
+	for range cap(slow.send) + 1 {
+		hub.Send(10, []byte("msg"))
+	}
+
+	// then its handler leaves and unregisters it a second time, as ws.go does
+	hub.Unregister(10, websocket.StatusNormalClosure, slow)
+
+	require.Equal(t, 1, hub.Connections())
 }

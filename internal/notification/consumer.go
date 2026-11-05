@@ -17,14 +17,16 @@ type Consumer struct {
 	handler       Handler
 	logger        *slog.Logger
 	retryInterval time.Duration // pause before retry after a temporal error
+	metrics       *Metrics
 }
 
-func NewConsumer(client *kgo.Client, h Handler, l *slog.Logger) *Consumer {
+func NewConsumer(client *kgo.Client, h Handler, m *Metrics, l *slog.Logger) *Consumer {
 	return &Consumer{
 		client:        client,
 		handler:       h,
 		logger:        l,
 		retryInterval: 1 * time.Second,
+		metrics:       m,
 	}
 }
 
@@ -78,6 +80,8 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) error {
 		if ctx.Err() != nil {
 			return err
 		}
+
+		c.metrics.errors.Inc()
 
 		select {
 		case <-ctx.Done():
