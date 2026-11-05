@@ -145,7 +145,7 @@ services:
 
     volumes:
       - ./deploy/prometheus:/etc/prometheus:ro
-      - prom_data:/prometheus
+      - promdata:/prometheus
 
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.11.0
@@ -155,7 +155,28 @@ services:
       kafka:
         condition: service_healthy
 
+  grafana:
+    image: grafana/grafana:13.2.5
+
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./deploy/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deploy/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro
+
+    depends_on:
+      prometheus:
+        condition: service_started
+
 volumes:
   pgdata:
   kafkadata:
-  prom_data:
+  promdata:
+  grafanadata:
