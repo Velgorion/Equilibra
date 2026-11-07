@@ -175,6 +175,38 @@ services:
       prometheus:
         condition: service_started
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.165.0
+
+    command: [ "--config=/etc/otel/collector.yaml" ]
+
+    volumes:
+      - ./deploy/otel:/etc/otel:ro
+
+    ports:
+      - "127.0.0.1:4317:4317"
+
+    restart: unless-stopped
+
+    depends_on:
+      jaeger:
+        condition: service_healthy
+
+  jaeger:
+    image: jaegertracing/jaeger:2.23.0
+
+    ports:
+      - "127.0.0.1:16686:16686"
+
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "localhost:16686" ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+    restart: unless-stopped
+
 volumes:
   pgdata:
   kafkadata:
