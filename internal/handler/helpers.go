@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Velgorion/equilibra/internal/service"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Envelope serves to provide JSON respones
@@ -128,4 +130,13 @@ func idempotencyKey(r *http.Request) (string, error) {
 		return "", fmt.Errorf("Idempotency-Key header: empty or not exist")
 	}
 	return key, nil
+}
+
+func TraceIDFromContext(ctx context.Context) string {
+	sc := trace.SpanFromContext(ctx).SpanContext()
+	if !sc.IsValid() {
+		return ""
+	}
+
+	return sc.TraceID().String()
 }

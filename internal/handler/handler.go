@@ -11,6 +11,11 @@ import (
 
 	"github.com/Velgorion/equilibra/internal/service"
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel/trace"
+)
+
+const (
+	TraceIDHeader = "x-trace-id"
 )
 
 type Service interface {
@@ -57,6 +62,20 @@ func New(s Service, build BuildInfo, l *slog.Logger) *API {
 
 func (a *API) Routes() http.Handler {
 	r := chi.NewRouter()
+
+	r.Use(func(nextHandler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			traceID := TraceIDFromContext(r.Context())
+
+			if traceID != "" {
+				w.Header().Set(TraceIDHeader, traceID)
+			}
+
+			nextHandler.ServeHTTP(w, r)
+			pattern := chi.RouteContext(r.Context()).RoutePattern()
+			trace.SpanFromContext(r.Context()).SetName(r.Method + " " + pattern)
+		})
+	})
 
 	r.NotFound(a.routeNotFoundResponse)
 	r.MethodNotAllowed(a.methodNotAllowedResponse)

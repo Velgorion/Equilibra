@@ -49,6 +49,7 @@ type Config struct {
 	Relay        Relay
 	Notification Notification
 	Redis        Redis
+	Tracing      Tracing
 	Env          string `env:"ENV,required"`
 	Version      string `env:"VERSION,required"`
 	Port         int    `env:"PORT" envDefault:"8080"`
@@ -59,6 +60,11 @@ type NotificationConfig struct {
 	Redis        Redis
 	Notification Notification
 	LogLevel     slog.Level `env:"LOG_LEVEL" envDefault:"INFO"`
+}
+
+type Tracing struct {
+	CollectorEndpoint string  `env:"OTEL_COLLECTOR_ENDPOINT,required"`
+	SamplingRatio     float64 `env:"SAMPLING_RATIO" envDefault:"1.0"`
 }
 
 func LoadNotification() (NotificationConfig, error) {
