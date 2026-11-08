@@ -13,6 +13,7 @@ import (
 	"github.com/Velgorion/equilibra/internal/service"
 	"github.com/Velgorion/equilibra/internal/storage"
 	"github.com/Velgorion/equilibra/internal/telemetry"
+	"github.com/exaring/otelpgx"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/joho/godotenv"
@@ -38,7 +39,7 @@ func run() error {
 
 	logger.Info("config loaded")
 
-	db, err := storage.Open(context.Background(), cfg.Database)
+	db, err := storage.Open(context.Background(), cfg.Database, storage.WithQueryTracer(otelpgx.NewTracer()))
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

@@ -72,7 +72,7 @@ type OutboxEvent struct {
 
 // Open creates a connection pool configured from cfg and checks that the
 // database is reachable
-func Open(ctx context.Context, cfg config.Database) (*pgxpool.Pool, error) {
+func Open(ctx context.Context, cfg config.Database, opts ...Option) (*pgxpool.Pool, error) {
 	dbConfig, err := pgxpool.ParseConfig(cfg.DSN)
 	if err != nil {
 		return nil, err
@@ -84,6 +84,10 @@ func Open(ctx context.Context, cfg config.Database) (*pgxpool.Pool, error) {
 	dbConfig.MinConns = cfg.MinConns
 	dbConfig.MinIdleConns = cfg.MinIdleConns
 	dbConfig.MaxConnLifetimeJitter = cfg.MaxConnLifetimeJitter
+
+	for _, opt := range opts {
+		opt.apply(dbConfig)
+	}
 
 	dbpool, err := pgxpool.NewWithConfig(ctx, dbConfig)
 	if err != nil {
