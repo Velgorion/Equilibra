@@ -12,12 +12,6 @@ processors:
     limit_mib: 256        
     spike_limit_mib: 64
 
-  resource:
-    attributes:
-      - key: deployment.environment
-        value: dev
-        action: insert
-
   probabilistic_sampler:
     sampling_percentage: 100
 
@@ -56,5 +50,5 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, resource, probabilistic_sampler, batch]
+      processors: [memory_limiter, probabilistic_sampler, batch]
       exporters: [otlp_grpc/jaeger]
