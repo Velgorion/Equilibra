@@ -11,6 +11,7 @@ import (
 	"github.com/Velgorion/equilibra/internal/config"
 	"github.com/Velgorion/equilibra/internal/handler"
 	"github.com/Velgorion/equilibra/internal/service"
+	"github.com/Velgorion/equilibra/internal/service/tracing"
 	"github.com/Velgorion/equilibra/internal/storage"
 	"github.com/Velgorion/equilibra/internal/telemetry"
 	"github.com/exaring/otelpgx"
@@ -68,7 +69,7 @@ func run() error {
 	}()
 
 	store := storage.New(db)
-	svc := service.New(store)
+	svc := tracing.NewTracedService(service.New(store))
 	api := handler.New(svc, handler.BuildInfo{Env: cfg.Env, Version: cfg.Version}, logger)
 
 	return serve(cfg, logger, otelhttp.NewHandler(api.Routes(), "api"))
