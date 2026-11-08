@@ -115,7 +115,7 @@ func (s *Storage) WithTx(ctx context.Context, fn func(q Querier) error) error {
 	}
 
 	defer func() {
-		rollbackCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 		defer cancel()
 		_ = tx.Rollback(rollbackCtx)
 	}()
@@ -127,7 +127,7 @@ func (s *Storage) WithTx(ctx context.Context, fn func(q Querier) error) error {
 		return err
 	}
 
-	commitCtx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitTimeout)
 	defer cancel()
 
 	return tx.Commit(commitCtx)
