@@ -14,7 +14,7 @@ func (a *API) logError(r *http.Request, err error) {
 		uri    = r.URL.RequestURI()
 	)
 
-	a.logger.Error(err.Error(), "method", method, "uri", uri)
+	a.logger.ErrorContext(r.Context(), "internal error", "method", method, "uri", uri, "error", err)
 }
 
 func (a *API) errorResponse(w http.ResponseWriter, r *http.Request, status int, message any) {

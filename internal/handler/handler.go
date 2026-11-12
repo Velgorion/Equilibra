@@ -63,6 +63,10 @@ func New(s Service, build BuildInfo, l *slog.Logger) *API {
 func (a *API) Routes() http.Handler {
 	r := chi.NewRouter()
 
+	r.Use(a.observe)
+
+	// This middleware sets the "trace_id" header value to the response
+	// and also sets the span name as <method+pattern>
 	r.Use(func(nextHandler http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			traceID := TraceIDFromContext(r.Context())
