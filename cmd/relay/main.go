@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Velgorion/equilibra/internal/config"
+	"github.com/Velgorion/equilibra/internal/logging"
 	"github.com/Velgorion/equilibra/internal/publisher"
 	"github.com/Velgorion/equilibra/internal/relay"
 	"github.com/Velgorion/equilibra/internal/storage"
@@ -26,6 +27,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const serviceName = "relay"
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -35,7 +38,8 @@ func main() {
 func run() error {
 	_ = godotenv.Load() // ignore the error in the sense that we won't have a .env file in prod, only while local development
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil)).With("component", "relay")
+	base := slog.New(logging.WithTrace(slog.NewJSONHandler(os.Stdout, nil)))
+	logger := base.With("component", "relay")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -55,7 +59,7 @@ func run() error {
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(cfg.Kafka.Brokers...),
 		kgo.DefaultProduceTopic(cfg.Kafka.Topic),
-		kgo.WithLogger(kslog.New(slog.New(slog.NewTextHandler(os.Stdout, nil)).With("component", "kafka"))),
+		kgo.WithLogger(kslog.New(base.With("component", "kafka"))),
 	)
 	if err != nil {
 		return err

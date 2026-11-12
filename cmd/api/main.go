@@ -10,6 +10,7 @@ import (
 
 	"github.com/Velgorion/equilibra/internal/config"
 	"github.com/Velgorion/equilibra/internal/handler"
+	"github.com/Velgorion/equilibra/internal/logging"
 	"github.com/Velgorion/equilibra/internal/service"
 	"github.com/Velgorion/equilibra/internal/service/tracing"
 	"github.com/Velgorion/equilibra/internal/storage"
@@ -31,7 +32,7 @@ func main() {
 func run() error {
 	_ = godotenv.Load() // ignore the error in the sense that we won't have a .env file in prod, only while local development
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil)).With("component", serviceName)
+	logger := slog.New(logging.WithTrace(slog.NewJSONHandler(os.Stdout, nil))).With("component", serviceName)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -40,7 +41,9 @@ func run() error {
 
 	logger.Info("config loaded")
 
-	db, err := storage.Open(context.Background(), cfg.Database, storage.WithQueryTracer(otelpgx.NewTracer()))
+	db, err := storage.Open(context.Background(), cfg.Database,
+		storage.WithQueryTracer(otelpgx.NewTracer(otelpgx.WithQuerySpanNamePrefix())))
+
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

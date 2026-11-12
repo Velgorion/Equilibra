@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Velgorion/equilibra/internal/config"
+	"github.com/Velgorion/equilibra/internal/logging"
 	"github.com/Velgorion/equilibra/internal/notification"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,6 +23,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
 )
+
+const serviceName = "notification"
 
 const (
 	pingTimeout = 5 * time.Second
@@ -41,7 +44,8 @@ func run() error {
 		return err
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})).With("component", "notification")
+	logger := slog.New(logging.WithTrace(slog.NewJSONHandler(os.Stdout,
+		&slog.HandlerOptions{Level: cfg.LogLevel}))).With("component", serviceName)
 
 	logger.Info("config loaded")
 
